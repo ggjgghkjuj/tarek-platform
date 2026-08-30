@@ -1,0 +1,17 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pkl
+
+# Streamlit & build artifacts
+build/
+dist/
+*.spec
+
+# Database & reports (مولّدة تلقائياً - لا تُرفع)
+attendance_log.db
+reports/*.xlsx
+!reports/.gitkeep
+
+# Local settings
+.vscode/
