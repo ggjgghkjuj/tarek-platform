@@ -2,24 +2,24 @@ import streamlit as st
 import cv2
 import os
 import io
+import hmac
 import time
 import shutil
 import numpy as np
 import pandas as pd
 from datetime import datetime
+import av
 import face_recognition
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, ClientSettings
+from streamlit_webrtc import webrtc_streamer
 
 # ============================================================
 # إعدادات المنصة
 # ============================================================
 DB_PATH = "faces_db"
 LOG_DB = "attendance_log.db"
-REPORTS_DIR = "reports"
 TODAY = datetime.now().strftime("%Y-%m-%d")
 
 os.makedirs(DB_PATH, exist_ok=True)
-os.makedirs(REPORTS_DIR, exist_ok=True)
 
 PLATFORM_NAME = "Tarek Platform"
 PLATFORM_NAME_AR = "منصة طارق"
@@ -81,6 +81,17 @@ LANGUAGES = {
         "lang_label": "اللغة",
         "motion_threshold": "حساسية كشف الحركة",
         "processing": "جاري المعالجة...",
+        "camera_label": "مصدر الكاميرا",
+        "cam_front": "الكاميرا الأمامية",
+        "cam_back": "الكاميرا الخلفية",
+        "login_title": "تسجيل الدخول",
+        "login_sub": "هذه المنصة محمية — أدخل كلمة سر المطوّر",
+        "password_label": "كلمة السر",
+        "login_btn": "دخول",
+        "wrong_password": "كلمة السر غير صحيحة",
+        "auth_not_configured": "لم يتم ضبط كلمة السر بعد — تواصل مع المطوّر",
+        "logout": "تسجيل الخروج",
+        "developer": "المطوّر",
     },
     "en": {
         "code": "en",
@@ -135,6 +146,17 @@ LANGUAGES = {
         "lang_label": "Language",
         "motion_threshold": "Motion Detection Sensitivity",
         "processing": "Processing...",
+        "camera_label": "Camera Source",
+        "cam_front": "Front Camera",
+        "cam_back": "Back Camera",
+        "login_title": "Login",
+        "login_sub": "This platform is protected — enter the developer password",
+        "password_label": "Password",
+        "login_btn": "Login",
+        "wrong_password": "Wrong password",
+        "auth_not_configured": "Developer password is not configured yet — contact the developer",
+        "logout": "Log out",
+        "developer": "Developer",
     },
 }
 
@@ -420,6 +442,54 @@ st.set_page_config(page_title=f"{LANG['title']} - {LANG['subtitle']}", layout="w
 inject_css(st.session_state.dark_mode, st.session_state.lang_code)
 
 # ============================================================
+# الحماية بكلمة السر (شاشة الدخول للمطوّر)
+# ============================================================
+try:
+    AUTH_PASSWORD = st.secrets.get("DEVELOPER_PASSWORD")
+except Exception:
+    AUTH_PASSWORD = None
+
+
+def render_login_gate():
+    """يعرض شاشة الدخول ويوقف التطبيق حتى إدخال كلمة السر الصحيحة."""
+    if st.session_state.get("auth_role") == "developer":
+        return
+    if not AUTH_PASSWORD:
+        st.markdown(f"""
+        <div class="hero">
+            <div class="hero-logo">🔐</div>
+            <div>
+                <p class="hero-title">{LANG['login_title']}</p>
+                <p class="hero-sub">{LANG['auth_not_configured']}</p>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.stop()
+        return
+    st.markdown(f"""
+    <div class="hero">
+        <div class="hero-logo">🔐</div>
+        <div>
+            <p class="hero-title">{LANG['login_title']}</p>
+            <p class="hero-sub">{LANG['login_sub']}</p>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        pwd = st.text_input(LANG["password_label"], type="password")
+        if st.button(LANG["login_btn"], use_container_width=True):
+            if pwd and hmac.compare_digest(pwd, AUTH_PASSWORD):
+                st.session_state.auth_role = "developer"
+                st.rerun()
+            else:
+                st.error(LANG["wrong_password"])
+    st.stop()
+
+
+render_login_gate()
+
+# ============================================================
 # الرأس / اسم المنصة
 # ============================================================
 st.markdown(f"""
@@ -440,6 +510,14 @@ st.markdown(f"<p style='color:var(--sub);'>{LANG['info']}</p>", unsafe_allow_htm
 # ============================================================
 with st.sidebar:
     st.markdown(f"## {LANG['sidebar']}")
+
+    # المطوّر الحالي + تسجيل الخروج
+    if st.session_state.get("auth_role") == "developer":
+        st.caption(f"👨‍💻 {LANG['developer']}")
+        if st.button(LANG["logout"], use_container_width=True):
+            st.session_state.pop("auth_role", None)
+            st.rerun()
+        st.divider()
 
     # اللغة
     lang_label = LANG["lang_label"]
@@ -485,6 +563,7 @@ with st.sidebar:
                     with open(save_path, "wb") as f:
                         f.write(uploaded_file.getbuffer())
                     st.success(LANG["add_success"].format(new_name.strip(), selected_class))
+                    st.cache_resource.clear()
                     time.sleep(1)
                     st.rerun()
             else:
@@ -521,6 +600,7 @@ with st.sidebar:
                     if col2.button(LANG["confirm_delete"], key=f"yes_{cl}"):
                         shutil.rmtree(os.path.join(DB_PATH, cl), ignore_errors=True)
                         st.session_state.pop(ckey, None)
+                        st.cache_resource.clear()
                         st.rerun()
                     if col3.button("✖", key=f"no_{cl}"):
                         st.session_state.pop(ckey, None)
@@ -567,7 +647,11 @@ with st.sidebar:
 
     # زر تنزيل Excel
     if st.button(LANG["download_excel"]):
-        df = generate_excel(TODAY, st.session_state.lang_code)
+        if filter_class == LANG["all_classes"]:
+            df = generate_excel(TODAY, st.session_state.lang_code)
+        else:
+            map_val = "__root__" if filter_class == LANG["untracked"] else filter_class
+            df = generate_excel_for_class(TODAY, map_val, st.session_state.lang_code)
         if df.empty:
             st.warning(LANG["no_data"])
         else:
@@ -581,6 +665,13 @@ with st.sidebar:
             )
 
     st.divider()
+
+    # إعدادات الكاميرا: الحساسية + مصدر الكاميرا
+    motion_threshold = st.slider(LANG["motion_threshold"], 1.0, 30.0, 8.0, 0.5)
+    cam_options = [LANG["cam_front"], LANG["cam_back"]]
+    selected_cam = st.selectbox(LANG["camera_label"], cam_options)
+    camera_mode = "user" if selected_cam == LANG["cam_front"] else "environment"
+
     st.caption(f"{LANG['students_count']}: {len(all_students_names())} | {LANG['date']}: {TODAY}")
 
 
@@ -622,45 +713,55 @@ known_encodings, known_names = load_known_encodings()
 
 
 # ============================================================
-# معالجة الفيديو (كشف الحركة + تعرف)
+# معالجة الفيديو (كشف الحركة + تعرف) — API الجديد
 # ============================================================
-class FaceProcessor(VideoTransformerBase):
-    def __init__(self):
-        self.last_time = 0
+class _SessionState:
+    """حالة جلسة الكاميرا، تُشارك بين الإطارات عبر الـ callback."""
+    def __init__(self, lang_code, motion_threshold):
+        self.lang_code = lang_code
+        self.motion_threshold = motion_threshold
+        self.last_time = 0.0
         self.prev_center = None
+        self.first_face = True
         self.process_interval = 2.0
 
-    def transform(self, frame):
+
+def make_video_processor(lang_code, motion_threshold):
+    """يُنشئ دالة callback تعالج الإطارات: كشف وجوه + تعرف + كشف حركة."""
+    state = _SessionState(lang_code, motion_threshold)
+
+    def video_frame_callback(frame):
         img = frame.to_ndarray(format="bgr24")
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
         now = time.time()
-        if now - self.last_time > self.process_interval:
-            self.last_time = now
+        if now - state.last_time > state.process_interval:
+            state.last_time = now
 
             face_locations = face_recognition.face_locations(rgb)
             face_encodings = face_recognition.face_encodings(rgb, face_locations)
 
-            scanning_text = LANGUAGES["en"]["scanning"] if st.session_state.lang_code == "en" else LANGUAGES["ar"]["scanning"]
+            scanning_text = LANGUAGES[state.lang_code]["scanning"]
 
             if len(face_encodings) == 0:
-                self.prev_center = None
+                state.prev_center = None
+                state.first_face = True
                 cv2.putText(img, scanning_text, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-                return img
+                return av.VideoFrame.from_ndarray(img, format="bgr24")
 
             face_encoding = face_encodings[0]
             top, right, bottom, left = face_locations[0]
             center = ((left + right) / 2, (top + bottom) / 2)
 
-            # كشف الحركة
+            # كشف الحركة (مضاد الاحتيال)
             is_live = False
-            if self.prev_center is not None:
-                dist = np.sqrt((center[0] - self.prev_center[0]) ** 2 + (center[1] - self.prev_center[1]) ** 2)
-                if dist > 8.0:
+            if state.prev_center is not None:
+                dist = np.sqrt((center[0] - state.prev_center[0]) ** 2 + (center[1] - state.prev_center[1]) ** 2)
+                if dist > state.motion_threshold:
                     is_live = True
-            self.prev_center = center
+            state.prev_center = center
 
-            # التعرف
+            # التعرف على الوجه
             if len(known_encodings) > 0:
                 matches = face_recognition.compare_faces(known_encodings, face_encoding, tolerance=0.5)
                 name = known_names[matches.index(True)] if True in matches else "Unknown"
@@ -670,7 +771,12 @@ class FaceProcessor(VideoTransformerBase):
             live_suffix = LANGUAGES["en"]["live_suffix"]
             photo_text = LANGUAGES["en"]["photo_text"]
 
-            if is_live:
+            # أول كشف للوجه: نعرض الاسم بدل اتهامه بأنه صورة
+            if state.first_face:
+                state.first_face = False
+                color = (0, 255, 0)
+                label = name if name != "Unknown" else scanning_text
+            elif is_live:
                 if name != "Unknown":
                     color = (0, 255, 0)
                     label = f"{name} {live_suffix}"
@@ -685,7 +791,9 @@ class FaceProcessor(VideoTransformerBase):
             cv2.rectangle(img, (left, top), (right, bottom), color, 2)
             cv2.putText(img, label, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
 
-        return img
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+    return video_frame_callback
 
 
 # ============================================================
@@ -696,11 +804,12 @@ st.caption(LANG["live_hint"])
 
 webrtc_streamer(
     key="tarek-face-recognition",
-    video_transformer_factory=FaceProcessor,
-    media_stream_constraints={"video": True, "audio": False},
-    client_settings=ClientSettings(
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-        media_stream_constraints={"video": True, "audio": False},
-    ),
-    async_processing=True,
+    video_frame_callback=make_video_processor(st.session_state.lang_code, motion_threshold),
+    media_stream_constraints={
+        "video": {"facingMode": camera_mode},
+        "audio": False,
+    },
+    rtc_configuration={
+        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+    },
 )

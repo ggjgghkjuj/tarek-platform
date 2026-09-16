@@ -13,5 +13,10 @@ attendance_log.db
 reports/*.xlsx
 !reports/.gitkeep
 
+# بيانات الطلاب (صورهم) - تُضاف من الواجهة، لا تُرفع للمستودع
+faces_db/*
+!faces_db/.gitkeep
+
 # Local settings
 .vscode/
+.streamlit/secrets.toml
