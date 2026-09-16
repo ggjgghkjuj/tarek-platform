@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 import av
-import face_recognition
 from streamlit_webrtc import webrtc_streamer
 
 # ============================================================
@@ -23,6 +22,37 @@ os.makedirs(DB_PATH, exist_ok=True)
 
 PLATFORM_NAME = "Tarek Platform"
 PLATFORM_NAME_AR = "منصة طارق"
+
+# ============================================================
+# نماذج OpenCV (YuNet للكشف + SFace للتعرف) — بدون حاجة لـ dlib
+# ============================================================
+MODELS_DIR = "models"
+FACE_DETECTOR = None
+FACE_RECOGNIZER = None
+FACE_MATCH_THRESHOLD = 0.36
+
+
+def ensure_models():
+    """يحمّل نماذج الكشف والتعرف مرة واحدة فقط لكل عملية."""
+    global FACE_DETECTOR, FACE_RECOGNIZER
+    if FACE_DETECTOR is None:
+        det_path = os.path.join(MODELS_DIR, "face_detection_yunet_2023mar.onnx")
+        rec_path = os.path.join(MODELS_DIR, "face_recognition_sface_2021dec.onnx")
+        FACE_DETECTOR = cv2.FaceDetectorYN_create(det_path, "", (320, 320))
+        FACE_RECOGNIZER = cv2.FaceRecognizerSF_create(rec_path, "")
+    return FACE_DETECTOR, FACE_RECOGNIZER
+
+
+def face_feature_from_image(img):
+    """يعيد متجه التعرف لأول وجه في الصورة، أو None إن لم يوجد وجه."""
+    detector, recognizer = ensure_models()
+    h, w = img.shape[:2]
+    detector.setInputSize((w, h))
+    _, faces = detector.detect(img)
+    if faces is None or len(faces) == 0:
+        return None
+    aligned = recognizer.alignCrop(img, faces[0])
+    return recognizer.feature(aligned)
 
 # ============================================================
 # دعم اللغات
@@ -680,10 +710,12 @@ with st.sidebar:
 # ============================================================
 def _add_encoding(path, name, encodings, names):
     try:
-        image = face_recognition.load_image_file(path)
-        encs = face_recognition.face_encodings(image)
-        if len(encs) > 0:
-            encodings.append(encs[0])
+        img = cv2.imread(path)
+        if img is None:
+            return
+        feat = face_feature_from_image(img)
+        if feat is not None:
+            encodings.append(feat)
             names.append(name)
     except Exception:
         pass
@@ -732,26 +764,34 @@ def make_video_processor(lang_code, motion_threshold):
 
     def video_frame_callback(frame):
         img = frame.to_ndarray(format="bgr24")
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
         now = time.time()
         if now - state.last_time > state.process_interval:
             state.last_time = now
 
-            face_locations = face_recognition.face_locations(rgb)
-            face_encodings = face_recognition.face_encodings(rgb, face_locations)
+            detector, recognizer = ensure_models()
+            h, w = img.shape[:2]
+            detector.setInputSize((w, h))
+            _, faces = detector.detect(img)
 
             scanning_text = LANGUAGES[state.lang_code]["scanning"]
 
-            if len(face_encodings) == 0:
+            if faces is None or len(faces) == 0:
                 state.prev_center = None
                 state.first_face = True
                 cv2.putText(img, scanning_text, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
                 return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-            face_encoding = face_encodings[0]
-            top, right, bottom, left = face_locations[0]
+            face = faces[0]
+            fx, fy, fw, fh = face[:4]
+            left = int(fx)
+            top = int(fy)
+            right = int(fx + fw)
+            bottom = int(fy + fh)
             center = ((left + right) / 2, (top + bottom) / 2)
+
+            aligned = recognizer.alignCrop(img, face)
+            face_encoding = recognizer.feature(aligned)
 
             # كشف الحركة (مضاد الاحتيال)
             is_live = False
@@ -763,8 +803,14 @@ def make_video_processor(lang_code, motion_threshold):
 
             # التعرف على الوجه
             if len(known_encodings) > 0:
-                matches = face_recognition.compare_faces(known_encodings, face_encoding, tolerance=0.5)
-                name = known_names[matches.index(True)] if True in matches else "Unknown"
+                best_sim = -1.0
+                best_name = "Unknown"
+                for known_feat, known_name in zip(known_encodings, known_names):
+                    sim = recognizer.match(face_encoding, known_feat)
+                    if sim > best_sim:
+                        best_sim = sim
+                        best_name = known_name
+                name = best_name if best_sim >= FACE_MATCH_THRESHOLD else "Unknown"
             else:
                 name = "Unknown"
 
