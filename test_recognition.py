@@ -1,12 +1,27 @@
 # -*- coding: utf-8 -*-
 """
 اختبار دقة التعرف: يبني مصفوفة تشابه بين كل الصور المحلية (faces_db)
-ويقيّم العتبة الحالية 0.36.
+ويقيّم العتبة الحالية (المأخوذة من app.FACE_MATCH_THRESHOLD).
     python test_recognition.py
 """
 import os
 import numpy as np
 import cv2
+from pathlib import Path
+
+
+def app_face_threshold():
+    import ast
+    src = Path("app.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "FACE_MATCH_THRESHOLD" for t in node.targets)
+            and isinstance(node.value, ast.Constant)
+        ):
+            return float(node.value.value)
+    return 0.40
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE, "faces_db")
@@ -80,7 +95,7 @@ def main():
 
     best_cross = max(crosses)
     print("\nأعلى تطابق بين أشخاص مختلفين: %.3f" % best_cross)
-    thr = 0.36
+    thr = app_face_threshold()
     if best_cross < thr - 0.05:
         verdict = "آمنة مع هامش جيد"
     elif best_cross < thr:
