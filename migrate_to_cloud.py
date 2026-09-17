@@ -64,6 +64,47 @@ def headers(key):
     }
 
 
+def items_from_manifest():
+    """يقرأ students.json الجديد (يدعم عدة صور ورقم قيد)."""
+    p = os.path.join(DB_PATH, "students.json")
+    if not os.path.exists(p):
+        return None
+    with open(p, encoding="utf-8") as f:
+        m = json.load(f)
+    photos_dir = os.path.join(DB_PATH, "photos")
+    items = []
+    for s in m.get("students", []):
+        for ph in s.get("photos", []):
+            items.append({
+                "name": s.get("name"),
+                "class": s.get("class"),
+                "student_id": s.get("student_id"),
+                "file": os.path.join(photos_dir, ph.get("file", "")),
+                "feature": ph.get("feature"),
+            })
+    return items
+
+
+def items_from_legacy():
+    """النمط القديم: صور في الجذر أو مجلدات صفوف."""
+    image_exts = (".jpg", ".jpeg", ".png")
+    items = []
+    for f in sorted(os.listdir(DB_PATH)):
+        full = os.path.join(DB_PATH, f)
+        if os.path.isfile(full) and f.lower().endswith(image_exts) and not f.startswith("."):
+            items.append({"name": os.path.splitext(f)[0], "class": None,
+                          "student_id": None, "file": full, "feature": None})
+    for d in sorted(os.listdir(DB_PATH)):
+        if not os.path.isdir(os.path.join(DB_PATH, d)) or d.startswith("."):
+            continue
+        for f in sorted(os.listdir(os.path.join(DB_PATH, d))):
+            full = os.path.join(DB_PATH, d, f)
+            if os.path.isfile(full) and f.lower().endswith(image_exts):
+                items.append({"name": os.path.splitext(f)[0], "class": d,
+                              "student_id": None, "file": full, "feature": None})
+    return items
+
+
 def main():
     secrets = load_secrets()
     url = secrets.get("SUPABASE_URL")
@@ -73,26 +114,27 @@ def main():
         sys.exit(1)
 
     det, rec = load_models()
-    image_exts = (".jpg", ".jpeg", ".png")
 
-    # 1) الطلاب من جذر faces_db (بدون تصنيف) ثم من مجلدات الصفوف
-    items = []
-    for f in sorted(os.listdir(DB_PATH)):
-        full = os.path.join(DB_PATH, f)
-        if os.path.isfile(full) and f.lower().endswith(image_exts) and not f.startswith("."):
-            items.append((os.path.splitext(f)[0], None, full))
-    for d in sorted(os.listdir(DB_PATH)):
-        if not os.path.isdir(os.path.join(DB_PATH, d)) or d.startswith("."):
-            continue
-        for f in sorted(os.listdir(os.path.join(DB_PATH, d))):
-            full = os.path.join(DB_PATH, d, f)
-            if os.path.isfile(full) and f.lower().endswith(image_exts):
-                items.append((os.path.splitext(f)[0], d, full))
+    if not os.path.isdir(DB_PATH):
+        print("لا يوجد مجلد faces_db")
+        sys.exit(1)
+    items = items_from_manifest()
+    if items is None:
+        items = items_from_legacy()
 
-    print("عدد الطلاب المحليين:", len(items))
+    print("عدد الصور المحلية:", len(items))
     added = 0
-    for name, class_name, full in items:
-        feat = feature_from_file(full, det, rec)
+    skipped = set()
+    for it in items:
+        name = it["name"]
+        class_name = it["class"]
+        key_pair = (name, class_name or "")
+        if key_pair in skipped:
+            continue
+        if it.get("feature"):
+            feat = np.asarray(it["feature"], dtype=float)
+        else:
+            feat = feature_from_file(it["file"], det, rec)
         if feat is None:
             print("  تخطي (لا يوجد وجه):", name)
             continue
@@ -106,6 +148,7 @@ def main():
             r = requests.get(url + "/rest/v1/students", params=params, headers=headers(key), timeout=10)
             if r.status_code == 200 and r.json():
                 print("  موجود مسبقا:", name, "- تخطي")
+                skipped.add(key_pair)
                 continue
         except Exception:
             pass
@@ -119,8 +162,8 @@ def main():
             except Exception:
                 pass
 
-        img_bytes = open(full, "rb").read()
-        ext = os.path.splitext(full)[1].lower()
+        img_bytes = open(it["file"], "rb").read()
+        ext = os.path.splitext(it["file"])[1].lower()
         object_path = str(int(time.time() * 1000)) + "_" + name.replace(" ", "_") + ext
         hdrs = headers(key)
         hdrs["Content-Type"] = "image/jpeg"
@@ -133,6 +176,7 @@ def main():
             payload = {
                 "name": name,
                 "class_name": class_name or None,
+                "student_id": it.get("student_id") or None,
                 "photo": object_path,
                 "feature": json.dumps(np.asarray(feat, dtype=float).tolist()),
             }

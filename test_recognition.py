@@ -49,24 +49,43 @@ def feature_of(path, det, rec):
     return feat, f"وجه عند {int(fx)},{int(fy)} {int(fw)}x{int(fh)}"
 
 
-def main():
-    det, rec = load_models()
+def collect_entries():
+    """(name, class, path) — من students.json الجديد أو من ملفات قديمة."""
     entries = []
+    manifest = os.path.join(DB_PATH, "students.json")
+    if os.path.exists(manifest):
+        import json
+        with open(manifest, encoding="utf-8") as f:
+            m = json.load(f)
+        photos_dir = os.path.join(DB_PATH, "photos")
+        for s in m.get("students", []):
+            for ph in s.get("photos", []):
+                entries.append((s.get("name"), s.get("class") or "",
+                                os.path.join(photos_dir, ph.get("file", ""))))
+        return entries
     for f in sorted(os.listdir(DB_PATH)):
         full = os.path.join(DB_PATH, f)
         if os.path.isfile(full) and f.lower().endswith((".jpg", ".jpeg", ".png")):
             entries.append((os.path.splitext(f)[0], "", full))
     for d in sorted(os.listdir(DB_PATH)):
-        if not os.path.isdir(os.path.join(DB_PATH, d)):
+        if not os.path.isdir(os.path.join(DB_PATH, d)) or d.startswith("."):
             continue
         for f in sorted(os.listdir(os.path.join(DB_PATH, d))):
             full = os.path.join(DB_PATH, d, f)
             if os.path.isfile(full) and f.lower().endswith((".jpg", ".jpeg", ".png")):
                 entries.append((os.path.splitext(f)[0], d, full))
+    return entries
+
+
+def main():
+    det, rec = load_models()
+    entries = collect_entries()
 
     feats = []
     print("=== استخراج البصمات ===")
     for name, cl, full in entries:
+        if not os.path.exists(full):
+            continue
         feat, meta = feature_of(full, det, rec)
         label = name + ("   [" + cl + "]" if cl else "")
         if feat is None:
@@ -77,7 +96,7 @@ def main():
 
     n = len(feats)
     if n == 0:
-        print("لا توجد صور قابلة للمعالجة")
+        print("لا توجد صور قابلة للمعالجة — أضف طلاباً من واجهة المنصة ثم أعد المحاولة.")
         return
 
     print("\n=== مصفوفة التشابه (COSINE) ===")
@@ -93,9 +112,14 @@ def main():
                 crosses.append(s)
         print(row)
 
+    thr = app_face_threshold()
+    if not crosses:
+        print("\nيوجد وجه واحد فقط — أضف طالباً آخر لقياس التمييز.")
+        print("العتبة الحالية %.2f" % thr)
+        return
+
     best_cross = max(crosses)
     print("\nأعلى تطابق بين أشخاص مختلفين: %.3f" % best_cross)
-    thr = app_face_threshold()
     if best_cross < thr - 0.05:
         verdict = "آمنة مع هامش جيد"
     elif best_cross < thr:

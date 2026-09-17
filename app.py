@@ -5,10 +5,12 @@ import io
 import json
 import hmac
 import time
+import uuid
 import shutil
+import threading
 import numpy as np
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 import av
 from streamlit_webrtc import webrtc_streamer
@@ -26,15 +28,19 @@ PLATFORM_NAME = "Tarek Platform"
 PLATFORM_NAME_AR = "منصة طارق"
 
 # ============================================================
-# طبقة التخزين: Supabase (سحابي متزامن) + نمط احتياطي محلي تلقائي
+# طبقة التخزين: Supabase (سحابي) + مخزن محلي (students.json + photos)
+# كل طالب قد يملك عدة صور (بصمات) + رقم قيد + صف.
 # ============================================================
 SUPABASE_URL = None
 SUPABASE_KEY = None
 PHOTO_BUCKET = "student-photos"
+MANIFEST_PATH = os.path.join(DB_PATH, "students.json")
+PHOTOS_DIR = os.path.join(DB_PATH, "photos")
+_manifest_lock = threading.Lock()
 
 
 def init_storage():
-    """يقرأ مفاتيح Supabase من Secrets؛ إن غابت تعمل البيانات محلياً."""
+    """يقرأ مفاتيح Supabase من Secrets؛ إن غابت يعمل المخزن المحلي."""
     global SUPABASE_URL, SUPABASE_KEY
     try:
         SUPABASE_URL = st.secrets.get("SUPABASE_URL")
@@ -56,15 +62,165 @@ def _rest_headers():
     }
 
 
-def cloud_add_student(name, class_name, image_bytes, ext):
-    """يرفع صورة الطالب ويخزّن بصمته في Supabase: (نجاح, رمز_الحالة)."""
-    img = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
-    if img is None:
-        return False, "cv2_fail"
-    feat = face_feature_from_image(img)
-    if feat is None:
-        return False, "no_face"
+def public_photo_url(object_path):
+    if not (cloud_enabled() and object_path):
+        return None
+    return f"{SUPABASE_URL}/storage/v1/object/public/{PHOTO_BUCKET}/{object_path}"
 
+
+# ------------------------------------------------------------------
+# المخزن المحلي
+# ------------------------------------------------------------------
+def _empty_manifest():
+    return {"classes": [], "students": []}
+
+
+def _load_manifest():
+    try:
+        with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
+            m = json.load(f)
+        m.setdefault("classes", [])
+        m.setdefault("students", [])
+        return m
+    except Exception:
+        return _empty_manifest()
+
+
+def _save_manifest(m):
+    os.makedirs(DB_PATH, exist_ok=True)
+    tmp = MANIFEST_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(m, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, MANIFEST_PATH)
+
+
+def _save_photo_bytes(image_bytes, ext):
+    os.makedirs(PHOTOS_DIR, exist_ok=True)
+    fname = f"{uuid.uuid4().hex[:12]}{ext or '.jpg'}"
+    with open(os.path.join(PHOTOS_DIR, fname), "wb") as f:
+        f.write(image_bytes)
+    return fname
+
+
+def _delete_photo_file(fname):
+    try:
+        os.remove(os.path.join(PHOTOS_DIR, os.path.basename(fname)))
+    except Exception:
+        pass
+
+
+def _find_local_student(m, name, class_name):
+    for s in m["students"]:
+        if s.get("name") == name and (s.get("class") or None) == (class_name or None):
+            return s
+    return None
+
+
+def _extract_features(files):
+    """files: [(bytes, ext)] -> (features, error)."""
+    feats = []
+    for data, ext in files:
+        img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            return None, "cv2_fail"
+        feat = face_feature_from_image(img)
+        if feat is None:
+            return None, "no_face"
+        feats.append(feat)
+    return feats, None
+
+
+def local_add_student(name, class_name, student_id, files):
+    feats, err = _extract_features(files)
+    if err:
+        return False, err
+    with _manifest_lock:
+        m = _load_manifest()
+        if _find_local_student(m, name, class_name) is not None:
+            return False, "duplicate"
+        photos = []
+        for (data, ext), feat in zip(files, feats):
+            photos.append({
+                "file": _save_photo_bytes(data, ext),
+                "feature": np.asarray(feat, dtype=float).tolist(),
+            })
+        m["students"].append({
+            "name": name,
+            "class": class_name or None,
+            "student_id": (student_id or "").strip() or None,
+            "photos": photos,
+        })
+        if class_name and class_name not in m["classes"]:
+            m["classes"].append(class_name)
+        _save_manifest(m)
+    return True, "ok"
+
+
+def local_add_photos(name, class_name, files):
+    feats, err = _extract_features(files)
+    if err:
+        return False, err
+    with _manifest_lock:
+        m = _load_manifest()
+        s = _find_local_student(m, name, class_name)
+        if s is None:
+            return False, "missing"
+        for (data, ext), feat in zip(files, feats):
+            s.setdefault("photos", []).append({
+                "file": _save_photo_bytes(data, ext),
+                "feature": np.asarray(feat, dtype=float).tolist(),
+            })
+        _save_manifest(m)
+    return True, "ok"
+
+
+def local_update_student(old_name, old_class, new_name, new_class, student_id):
+    with _manifest_lock:
+        m = _load_manifest()
+        s = _find_local_student(m, old_name, old_class)
+        if s is None:
+            return False, "missing"
+        s["name"] = new_name
+        s["class"] = new_class or None
+        s["student_id"] = (student_id or "").strip() or None
+        if new_class and new_class not in m["classes"]:
+            m["classes"].append(new_class)
+        _save_manifest(m)
+    return True, "ok"
+
+
+def local_delete_student(name, class_name):
+    with _manifest_lock:
+        m = _load_manifest()
+        s = _find_local_student(m, name, class_name)
+        if s is None:
+            return False
+        for p in s.get("photos", []):
+            _delete_photo_file(p.get("file"))
+        m["students"] = [x for x in m["students"] if x is not s]
+        _save_manifest(m)
+    return True
+
+
+def local_delete_photo(name, class_name, file_name):
+    with _manifest_lock:
+        m = _load_manifest()
+        s = _find_local_student(m, name, class_name)
+        if s is None:
+            return False
+        s["photos"] = [p for p in s.get("photos", []) if p.get("file") != file_name]
+        _save_manifest(m)
+    _delete_photo_file(file_name)
+    return True
+
+
+# ------------------------------------------------------------------
+# المخزن السحابي (Supabase)
+# ------------------------------------------------------------------
+def cloud_add_student(name, class_name, student_id, files):
+    feats, err = _extract_features(files)
+    if err:
+        return False, err
     if class_name:
         try:
             requests.post(
@@ -75,38 +231,169 @@ def cloud_add_student(name, class_name, image_bytes, ext):
             )
         except Exception:
             pass
-
-    object_path = f"{int(time.time() * 1000)}_{name.replace(' ', '_')}{ext}"
-    hdrs = _rest_headers()
-    hdrs["Content-Type"] = "image/jpeg"
-    try:
-        r = requests.post(
-            f"{SUPABASE_URL}/storage/v1/object/{PHOTO_BUCKET}/{object_path}",
-            data=image_bytes, headers=hdrs, timeout=30,
-        )
-        if r.status_code not in (200, 201, 204):
+    for (data, ext), feat in zip(files, feats):
+        object_path = f"{uuid.uuid4().hex[:12]}{ext or '.jpg'}"
+        hdrs = _rest_headers()
+        hdrs["Content-Type"] = "image/jpeg"
+        try:
+            r = requests.post(
+                f"{SUPABASE_URL}/storage/v1/object/{PHOTO_BUCKET}/{object_path}",
+                data=data, headers=hdrs, timeout=30,
+            )
+            if r.status_code not in (200, 201, 204):
+                return False, "upload"
+        except Exception:
             return False, "upload"
-    except Exception:
-        return False, "upload"
+        payload = {
+            "name": name,
+            "class_name": class_name or None,
+            "student_id": (student_id or "").strip() or None,
+            "photo": object_path,
+            "feature": json.dumps(np.asarray(feat, dtype=float).tolist()),
+        }
+        try:
+            r2 = requests.post(
+                f"{SUPABASE_URL}/rest/v1/students",
+                json=payload,
+                headers={**_rest_headers(), "Prefer": "return=representation"},
+                timeout=15,
+            )
+            if r2.status_code not in (200, 201):
+                if "student_id" in payload:
+                    payload.pop("student_id", None)
+                    r2 = requests.post(
+                        f"{SUPABASE_URL}/rest/v1/students",
+                        json=payload,
+                        headers={**_rest_headers(), "Prefer": "return=representation"},
+                        timeout=15,
+                    )
+                if r2.status_code not in (200, 201):
+                    return False, "insert"
+        except Exception:
+            return False, "insert"
+    return True, "ok"
 
+
+def cloud_add_photos(name, class_name, files):
+    return cloud_add_student(name, class_name, None, files)
+
+
+def cloud_update_student(old_name, old_class, new_name, new_class, student_id):
+    params = {"name": f"eq.{old_name}"}
+    if old_class:
+        params["class_name"] = f"eq.{old_class}"
     payload = {
-        "name": name,
-        "class_name": class_name or None,
-        "photo": object_path,
-        "feature": json.dumps(np.asarray(feat, dtype=float).tolist()),
+        "name": new_name,
+        "class_name": new_class or None,
+        "student_id": (student_id or "").strip() or None,
     }
     try:
-        r2 = requests.post(
-            f"{SUPABASE_URL}/rest/v1/students",
-            json=payload,
-            headers={**_rest_headers(), "Prefer": "return=representation"},
-            timeout=15,
-        )
-        if r2.status_code not in (200, 201):
-            return False, "insert"
+        r = requests.patch(f"{SUPABASE_URL}/rest/v1/students", params=params, json=payload,
+                           headers=_rest_headers(), timeout=15)
+        if r.status_code not in (200, 204) and "student_id" in payload:
+            payload.pop("student_id", None)
+            r = requests.patch(f"{SUPABASE_URL}/rest/v1/students", params=params, json=payload,
+                               headers=_rest_headers(), timeout=15)
+        return r.status_code in (200, 204), "ok"
     except Exception:
-        return False, "insert"
-    return True, "ok"
+        return False, "error"
+
+
+def cloud_delete_student(name, class_name):
+    params = {"name": f"eq.{name}"}
+    if class_name:
+        params["class_name"] = f"eq.{class_name}"
+    try:
+        r = requests.delete(f"{SUPABASE_URL}/rest/v1/students", params=params,
+                            headers=_rest_headers(), timeout=15)
+        return r.status_code in (200, 204)
+    except Exception:
+        return False
+
+
+# ------------------------------------------------------------------
+# واجهة موحّدة (تختار السحابة أو المحلي تلقائياً)
+# ------------------------------------------------------------------
+def add_student(name, class_name, student_id, files):
+    if cloud_enabled():
+        return cloud_add_student(name, class_name, student_id, files)
+    return local_add_student(name, class_name, student_id, files)
+
+
+def add_student_photos(name, class_name, files):
+    if cloud_enabled():
+        return cloud_add_photos(name, class_name, files)
+    return local_add_photos(name, class_name, files)
+
+
+def update_student(old_name, old_class, new_name, new_class, student_id):
+    if cloud_enabled():
+        return cloud_update_student(old_name, old_class, new_name, new_class, student_id)
+    return local_update_student(old_name, old_class, new_name, new_class, student_id)
+
+
+def delete_student(name, class_name):
+    if cloud_enabled():
+        return cloud_delete_student(name, class_name)
+    return local_delete_student(name, class_name)
+
+
+def delete_student_photo(name, class_name, file_name):
+    if cloud_enabled():
+        try:
+            requests.delete(f"{SUPABASE_URL}/rest/v1/students",
+                            params={"name": f"eq.{name}", "photo": f"eq.{file_name}"},
+                            headers=_rest_headers(), timeout=15)
+            return True
+        except Exception:
+            return False
+    return local_delete_photo(name, class_name, file_name)
+
+
+def add_class(class_name):
+    if cloud_enabled():
+        try:
+            requests.post(f"{SUPABASE_URL}/rest/v1/classes", json={"name": class_name},
+                          headers={**_rest_headers(), "Prefer": "resolution=ignore-duplicates,return=minimal"},
+                          timeout=10)
+            return True
+        except Exception:
+            return False
+    with _manifest_lock:
+        m = _load_manifest()
+        if class_name not in m["classes"]:
+            m["classes"].append(class_name)
+        _save_manifest(m)
+    return True
+
+
+def delete_class(class_name):
+    if cloud_enabled():
+        try:
+            requests.delete(f"{SUPABASE_URL}/rest/v1/students", params={"class_name": f"eq.{class_name}"},
+                            headers=_rest_headers(), timeout=15)
+            requests.delete(f"{SUPABASE_URL}/rest/v1/classes", params={"name": f"eq.{class_name}"},
+                            headers=_rest_headers(), timeout=15)
+            return True
+        except Exception:
+            return False
+    with _manifest_lock:
+        m = _load_manifest()
+        m["classes"] = [c for c in m["classes"] if c != class_name]
+        keep = []
+        for s in m["students"]:
+            if (s.get("class") or None) == class_name:
+                for p in s.get("photos", []):
+                    _delete_photo_file(p.get("file"))
+            else:
+                keep.append(s)
+        m["students"] = keep
+        _save_manifest(m)
+    return True
+
+
+def photo_path_for_local(file_name):
+    return os.path.join(PHOTOS_DIR, os.path.basename(file_name or ""))
 
 # ============================================================
 # نماذج OpenCV (YuNet للكشف + SFace للتعرف) — بدون حاجة لـ dlib
@@ -230,6 +517,35 @@ LANGUAGES = {
         "auth_not_configured": "لم يتم ضبط كلمة السر بعد — تواصل مع المطوّر",
         "logout": "تسجيل الخروج",
         "developer": "المطوّر",
+        "tab_manage": "إدارة الطلاب",
+        "student_id_label": "رقم القيد (اختياري)",
+        "extra_photos_label": "صور إضافية (اختياري)",
+        "select_student": "اختر الطالب",
+        "student_photos": "صور الطالب",
+        "no_students_yet": "لا يوجد طلاب مسجّلون بعد.",
+        "add_photos_btn": "إضافة الصور",
+        "save_btn": "حفظ التعديلات",
+        "delete_student_btn": "حذف الطالب",
+        "confirm_delete_student": "تأكيد حذف الطالب؟ (لا يمكن التراجع)",
+        "remove_photo": "حذف الصورة",
+        "update_success": "تم تحديث بيانات الطالب.",
+        "delete_success": "تم حذف الطالب.",
+        "photo_added": "تمت إضافة الصور بنجاح.",
+        "photo_removed": "تم حذف الصورة.",
+        "manage_hint": "اختر طالباً لعرض بياناته وصوره وتعديلها.",
+        "student_exists": "يوجد طالب بهذا الاسم في نفس الصف.",
+        "report_range": "تقرير فترة (أسبوعي/شهري)",
+        "report_from": "من تاريخ",
+        "report_to": "إلى تاريخ",
+        "download_range": "تنزيل تقرير الفترة (Excel)",
+        "range_empty": "لا توجد سجلات في هذه الفترة.",
+        "col_id": "رقم القيد",
+        "col_days_present": "أيام الحضور",
+        "col_total_days": "أيام التسجيل",
+        "col_percent": "نسبة الحضور %",
+        "sync_status": "المزامنة",
+        "sync_cloud": "سحابي (Supabase)",
+        "sync_local": "محلي",
     },
     "en": {
         "code": "en",
@@ -297,6 +613,35 @@ LANGUAGES = {
         "auth_not_configured": "Developer password is not configured yet — contact the developer",
         "logout": "Log out",
         "developer": "Developer",
+        "tab_manage": "Manage Students",
+        "student_id_label": "Student ID (optional)",
+        "extra_photos_label": "Additional photos (optional)",
+        "select_student": "Select a student",
+        "student_photos": "Student photos",
+        "no_students_yet": "No students registered yet.",
+        "add_photos_btn": "Add photos",
+        "save_btn": "Save changes",
+        "delete_student_btn": "Delete student",
+        "confirm_delete_student": "Confirm student deletion? (irreversible)",
+        "remove_photo": "Remove photo",
+        "update_success": "Student updated.",
+        "delete_success": "Student deleted.",
+        "photo_added": "Photos added successfully.",
+        "photo_removed": "Photo removed.",
+        "manage_hint": "Pick a student to view and edit their data and photos.",
+        "student_exists": "A student with this name already exists in the same class.",
+        "report_range": "Period Report (weekly/monthly)",
+        "report_from": "From",
+        "report_to": "To",
+        "download_range": "Download Period Report (Excel)",
+        "range_empty": "No records in this period.",
+        "col_id": "Student ID",
+        "col_days_present": "Days Present",
+        "col_total_days": "Recorded Days",
+        "col_percent": "Attendance %",
+        "sync_status": "Sync",
+        "sync_cloud": "Cloud (Supabase)",
+        "sync_local": "Local",
     },
 }
 
@@ -435,7 +780,7 @@ def inject_css(is_dark, lang_code="ar"):
 # دوال مساعدة للتعامل مع المجلدات (التشعيب)
 # ============================================================
 def get_classes():
-    """يعيد قائمة الصفوف — من Supabase أو من المجلدات محلياً."""
+    """يعيد قائمة الصفوف — من Supabase أو من students.json محلياً."""
     if cloud_enabled():
         try:
             r = requests.get(f"{SUPABASE_URL}/rest/v1/classes",
@@ -446,63 +791,53 @@ def get_classes():
         except Exception:
             pass
         return []
-    classes = [d for d in os.listdir(DB_PATH)
-               if os.path.isdir(os.path.join(DB_PATH, d)) and not d.startswith('.')]
-    return sorted(classes)
+    m = _load_manifest()
+    return sorted(set(m.get("classes", [])))
 
 
-def get_students_in_class(class_name=None):
-    """
-    class_name=None -> كل الصفوف + الطلاب بدون تصنيف.
-    class_name="__root__" -> الطلاب بدون تصنيف فقط.
-    يعيد قائمة tuples: (student_name, class_name_or_None)
-    """
+def get_student_records(class_name=None):
+    """سجلات كاملة (اسم، صف، رقم قيد، صور) للعرض والإدارة."""
     if cloud_enabled():
         try:
             r = requests.get(f"{SUPABASE_URL}/rest/v1/students",
-                             params={"select": "name,class_name", "order": "name.asc"},
-                             headers=_rest_headers(), timeout=10)
+                             params={"select": "name,class_name,student_id,photo", "order": "name.asc"},
+                             headers=_rest_headers(), timeout=15)
+            if r.status_code != 200:
+                r = requests.get(f"{SUPABASE_URL}/rest/v1/students",
+                                 params={"select": "name,class_name,photo", "order": "name.asc"},
+                                 headers=_rest_headers(), timeout=15)
             if r is not None and r.status_code == 200:
-                out = []
+                groups = {}
                 for row in r.json():
                     cl = row.get("class_name") or None
-                    if class_name is None:
-                        out.append((row["name"], cl))
-                    elif class_name == "__root__":
-                        if cl is None:
-                            out.append((row["name"], None))
-                    elif cl == class_name:
-                        out.append((row["name"], cl))
-                return out
+                    if class_name is not None and class_name != "__root__" and cl != class_name:
+                        continue
+                    if class_name == "__root__" and cl is not None:
+                        continue
+                    key = (row.get("name"), cl)
+                    g = groups.setdefault(key, {"name": row.get("name"), "class": cl,
+                                                "student_id": row.get("student_id"), "photos": []})
+                    if row.get("photo"):
+                        g["photos"].append({"file": row["photo"], "url": public_photo_url(row["photo"])})
+                return sorted(groups.values(), key=lambda g: (g["class"] or "", g["name"] or ""))
         except Exception:
             pass
         return []
+    out = []
+    for s in _load_manifest().get("students", []):
+        cl = s.get("class") or None
+        if class_name is not None and class_name != "__root__" and cl != class_name:
+            continue
+        if class_name == "__root__" and cl is not None:
+            continue
+        out.append({"name": s.get("name"), "class": cl, "student_id": s.get("student_id"),
+                    "photos": [{"file": p.get("file")} for p in s.get("photos", [])]})
+    return sorted(out, key=lambda g: (g["class"] or "", g["name"] or ""))
 
-    students = []
-    image_exts = ('.jpg', '.jpeg', '.png')
 
-    if class_name is None or class_name == "__root__":
-        for f in os.listdir(DB_PATH):
-            full = os.path.join(DB_PATH, f)
-            if os.path.isfile(full) and f.lower().endswith(image_exts) and not f.startswith('.'):
-                students.append((os.path.splitext(f)[0], None))
-
-    if class_name is None:
-        for cl in get_classes():
-            cl_dir = os.path.join(DB_PATH, cl)
-            for f in os.listdir(cl_dir):
-                full = os.path.join(cl_dir, f)
-                if os.path.isfile(full) and f.lower().endswith(image_exts):
-                    students.append((os.path.splitext(f)[0], cl))
-    elif class_name != "__root__":
-        cl_dir = os.path.join(DB_PATH, class_name)
-        if os.path.isdir(cl_dir):
-            for f in os.listdir(cl_dir):
-                full = os.path.join(cl_dir, f)
-                if os.path.isfile(full) and f.lower().endswith(image_exts):
-                    students.append((os.path.splitext(f)[0], class_name))
-
-    return students
+def get_students_in_class(class_name=None):
+    """قائمة (اسم, صف) — None لكل الطلاب، __root__ لغير المصنفين."""
+    return [(r["name"], r["class"]) for r in get_student_records(class_name)]
 
 
 def all_students_names():
@@ -579,50 +914,106 @@ def get_today_present():
 
 
 # ============================================================
-# توليد ملف Excel (مع عمود الصف)
+# توليد التقارير (صف + رقم قيد + حالة + فترة)
 # ============================================================
-def generate_excel(date, lang):
-    """يبني DataFrame يشمل كل الطلاب مع الصف والحالة ووقت الدخول."""
+def _present_map_for_date(date_str):
+    """dict: اسم -> وقت الدخول لتاريخ معيّن (سحابة أو محلي)."""
     present = {}
+    if cloud_enabled():
+        try:
+            r = requests.get(f"{SUPABASE_URL}/rest/v1/attendance",
+                             params={"select": "student_name,time", "date": f"eq.{date_str}"},
+                             headers=_rest_headers(), timeout=15)
+            if r is not None and r.status_code == 200:
+                for row in r.json():
+                    present[row.get("student_name")] = row.get("time") or ""
+        except Exception:
+            pass
+        return present
     conn = sqlite3_connect()
     c = conn.cursor()
-    c.execute("SELECT student_name, time FROM attendance WHERE date = ?", (date,))
+    c.execute("SELECT student_name, time FROM attendance WHERE date = ?", (date_str,))
     for name, t in c.fetchall():
         present[name] = t
     conn.close()
+    return present
 
-    students = get_students_in_class()
+
+def get_attendance_records(start_date, end_date):
+    """قائمة (اسم, تاريخ, وقت) بين تاريخين شاملين."""
+    if cloud_enabled():
+        try:
+            r = requests.get(f"{SUPABASE_URL}/rest/v1/attendance",
+                             params={"select": "student_name,date,time",
+                                     "date": [f"gte.{start_date}", f"lte.{end_date}"],
+                                     "order": "date.asc"},
+                             headers=_rest_headers(), timeout=20)
+            if r is not None and r.status_code == 200:
+                return [(row.get("student_name"), row.get("date"), row.get("time") or "") for row in r.json()]
+        except Exception:
+            pass
+        return []
+    conn = sqlite3_connect()
+    c = conn.cursor()
+    c.execute("SELECT student_name, date, time FROM attendance WHERE date BETWEEN ? AND ? ORDER BY date",
+              (start_date, end_date))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def generate_excel(date, lang):
+    """DataFrame: رقم القيد، الصف، الاسم، الحالة، وقت الدخول."""
+    present = _present_map_for_date(date)
+    L = LANGUAGES[lang]
     rows = []
-    untracked = LANGUAGES[lang]["untracked"]
-    status_p = LANGUAGES[lang]["status_present"]
-    status_a = LANGUAGES[lang]["status_absent"]
-    absent = LANGUAGES[lang]["absent_time"]
-    col_class = LANGUAGES[lang]["col_class"]
-    col_name = LANGUAGES[lang]["col_name"]
-    col_status = LANGUAGES[lang]["col_status"]
-    col_time = LANGUAGES[lang]["col_time"]
-
-    for name, cl in students:
-        class_display = cl if cl else untracked
-        if name in present:
-            rows.append({col_class: class_display, col_name: name, col_status: status_p, col_time: present[name]})
-        else:
-            rows.append({col_class: class_display, col_name: name, col_status: status_a, col_time: absent})
-
-    rows.sort(key=lambda r: (r[col_class], r[col_name]))
-    df = pd.DataFrame(rows, columns=[col_class, col_name, col_status, col_time])
-    return df
+    for s in get_student_records():
+        name = s.get("name")
+        cl = s.get("class")
+        rows.append({
+            L["col_id"]: s.get("student_id") or "",
+            L["col_class"]: cl if cl else L["untracked"],
+            L["col_name"]: name,
+            L["col_status"]: L["status_present"] if name in present else L["status_absent"],
+            L["col_time"]: present.get(name, L["absent_time"]),
+        })
+    rows.sort(key=lambda r: (r[L["col_class"]], r[L["col_name"]]))
+    return pd.DataFrame(rows, columns=[L["col_id"], L["col_class"], L["col_name"], L["col_status"], L["col_time"]])
 
 
 def generate_excel_for_class(date, class_name, lang):
     df = generate_excel(date, lang)
-    untracked = LANGUAGES[lang]["untracked"]
-    if class_name in ("__root__", None):
-        class_display = untracked
-    else:
-        class_display = class_name
-    col_class = LANGUAGES[lang]["col_class"]
-    return df[df[col_class] == class_display].reset_index(drop=True)
+    L = LANGUAGES[lang]
+    class_display = L["untracked"] if class_name in ("__root__", None) else class_name
+    return df[df[L["col_class"]] == class_display].reset_index(drop=True)
+
+
+def generate_range_report(start_date, end_date, lang):
+    """تقرير فترة: أيام الحضور لكل طالب + نسبة الحضور."""
+    records = get_attendance_records(start_date, end_date)
+    L = LANGUAGES[lang]
+    days = sorted({d for _, d, _ in records})
+    total_days = len(days)
+    present_days = {}
+    for name, d, _ in records:
+        present_days.setdefault(name, set()).add(d)
+    rows = []
+    for s in get_student_records():
+        name = s.get("name")
+        cl = s.get("class")
+        cnt = len(present_days.get(name, set()))
+        pct = round(cnt * 100.0 / total_days, 1) if total_days else 0.0
+        rows.append({
+            L["col_id"]: s.get("student_id") or "",
+            L["col_class"]: cl if cl else L["untracked"],
+            L["col_name"]: name,
+            L["col_days_present"]: cnt,
+            L["col_total_days"]: total_days,
+            L["col_percent"]: pct,
+        })
+    rows.sort(key=lambda r: (r[L["col_class"]], r[L["col_name"]]))
+    return pd.DataFrame(rows, columns=[L["col_id"], L["col_class"], L["col_name"],
+                                       L["col_days_present"], L["col_total_days"], L["col_percent"]])
 
 
 # ============================================================
@@ -743,7 +1134,7 @@ with st.sidebar:
 
     st.divider()
 
-    tab1, tab2 = st.tabs([LANG["tab1"], LANG["tab2"]])
+    tab1, tab_manage, tab2 = st.tabs([LANG["tab1"], LANG["tab_manage"], LANG["tab2"]])
 
     # ===== إضافة طالب =====
     with tab1:
@@ -753,19 +1144,19 @@ with st.sidebar:
         selected_class = st.selectbox(LANG["class_label"], options)
 
         new_name = st.text_input(LANG["name_label"])
-        uploaded_file = st.file_uploader(LANG["photo_label"], type=["jpg", "jpeg", "png"])
+        new_student_id = st.text_input(LANG["student_id_label"])
+        uploaded_files = st.file_uploader(LANG["photo_label"], type=["jpg", "jpeg", "png"],
+                                          accept_multiple_files=True, key="add_photos")
 
         if st.button(LANG["add_btn"]):
-            if new_name.strip() and uploaded_file:
-                image_bytes = uploaded_file.getbuffer()
-                ext = os.path.splitext(uploaded_file.name)[1].lower() or ".jpg"
+            if new_name.strip() and uploaded_files:
                 target_class = None if selected_class == LANG["untracked"] else selected_class
-
                 existing = [n for n, _ in get_students_in_class("__root__" if target_class is None else target_class)]
                 if new_name.strip() in existing:
-                    st.warning(LANG["add_duplicate"])
-                elif cloud_enabled():
-                    ok, status = cloud_add_student(new_name.strip(), target_class, image_bytes, ext)
+                    st.warning(LANG["student_exists"])
+                else:
+                    files = [(f.getbuffer(), os.path.splitext(f.name)[1].lower() or ".jpg") for f in uploaded_files]
+                    ok, status = add_student(new_name.strip(), target_class, new_student_id, files)
                     if status == "no_face":
                         st.warning(LANG["no_face_found"])
                     elif ok:
@@ -775,21 +1166,90 @@ with st.sidebar:
                         st.rerun()
                     else:
                         st.error(LANG["add_error"])
-                else:
-                    if target_class is None:
-                        target_dir = DB_PATH
-                    else:
-                        target_dir = os.path.join(DB_PATH, target_class)
-                        os.makedirs(target_dir, exist_ok=True)
-                    save_path = os.path.join(target_dir, f"{new_name.strip()}{ext}")
-                    with open(save_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-                    st.success(LANG["add_success"].format(new_name.strip(), selected_class))
-                    st.cache_resource.clear()
-                    time.sleep(1)
-                    st.rerun()
             else:
                 st.warning(LANG["add_warning"])
+
+    # ===== إدارة الطلاب =====
+    with tab_manage:
+        st.subheader(LANG["tab_manage"])
+        st.caption(LANG["manage_hint"])
+        recs = get_student_records()
+        if not recs:
+            st.info(LANG["no_students_yet"])
+        else:
+            labels = [f"{r['name']} — {r['class'] or LANG['untracked']}" for r in recs]
+            idx = st.selectbox(LANG["select_student"], range(len(labels)), format_func=lambda i: labels[i])
+            rec = recs[idx]
+            st.caption(f"{LANG['student_photos']}: {len(rec['photos'])}")
+
+            if rec["photos"]:
+                cols = st.columns(min(len(rec["photos"]), 3))
+                for i, ph in enumerate(rec["photos"]):
+                    with cols[i % len(cols)]:
+                        try:
+                            if ph.get("url"):
+                                st.image(ph["url"], use_container_width=True)
+                            else:
+                                st.image(photo_path_for_local(ph.get("file")), use_container_width=True)
+                        except Exception:
+                            st.caption(str(ph.get("file")))
+                        if st.button(LANG["remove_photo"], key=f"rm_{idx}_{i}"):
+                            delete_student_photo(rec["name"], rec["class"], ph.get("file"))
+                            st.cache_resource.clear()
+                            st.success(LANG["photo_removed"])
+                            time.sleep(0.5)
+                            st.rerun()
+
+            st.divider()
+            edit_name = st.text_input(LANG["name_label"], value=rec["name"], key=f"en_{idx}")
+            edit_id = st.text_input(LANG["student_id_label"], value=rec.get("student_id") or "", key=f"eid_{idx}")
+            class_opts = [LANG["untracked"]] + get_classes()
+            cur_class = rec["class"] or LANG["untracked"]
+            cls_index = class_opts.index(cur_class) if cur_class in class_opts else 0
+            edit_class = st.selectbox(LANG["class_label"], class_opts, index=cls_index, key=f"ec_{idx}")
+            if st.button(LANG["save_btn"], key=f"save_{idx}"):
+                new_class = None if edit_class == LANG["untracked"] else edit_class
+                ok, _ = update_student(rec["name"], rec["class"], edit_name.strip() or rec["name"], new_class, edit_id)
+                if ok:
+                    st.cache_resource.clear()
+                    st.success(LANG["update_success"])
+                    time.sleep(0.8)
+                    st.rerun()
+                else:
+                    st.error(LANG["add_error"])
+
+            extra = st.file_uploader(LANG["extra_photos_label"], type=["jpg", "jpeg", "png"],
+                                     accept_multiple_files=True, key=f"ex_{idx}")
+            if st.button(LANG["add_photos_btn"], key=f"addp_{idx}"):
+                if extra:
+                    files = [(f.getbuffer(), os.path.splitext(f.name)[1].lower() or ".jpg") for f in extra]
+                    ok, status = add_student_photos(rec["name"], rec["class"], files)
+                    if status == "no_face":
+                        st.warning(LANG["no_face_found"])
+                    elif ok:
+                        st.cache_resource.clear()
+                        st.success(LANG["photo_added"])
+                        time.sleep(0.8)
+                        st.rerun()
+                    else:
+                        st.error(LANG["add_error"])
+                else:
+                    st.warning(LANG["add_warning"])
+
+            st.divider()
+            dkey = f"dels_{idx}"
+            if st.session_state.get(dkey):
+                if st.button(LANG["confirm_delete_student"], key=f"yes_s_{idx}"):
+                    delete_student(rec["name"], rec["class"])
+                    st.session_state.pop(dkey, None)
+                    st.cache_resource.clear()
+                    st.success(LANG["delete_success"])
+                    time.sleep(0.8)
+                    st.rerun()
+            else:
+                if st.button(LANG["delete_student_btn"], key=f"del_s_{idx}"):
+                    st.session_state[dkey] = True
+                    st.rerun()
 
     # ===== إدارة الصفوف =====
     with tab2:
@@ -799,20 +1259,13 @@ with st.sidebar:
             if new_class.strip():
                 if new_class.strip() in get_classes():
                     st.warning(LANG["create_duplicate"])
-                elif cloud_enabled():
-                    try:
-                        requests.post(f"{SUPABASE_URL}/rest/v1/classes", json={"name": new_class.strip()},
-                                      headers={**_rest_headers(), "Prefer": "return=representation"}, timeout=10)
-                        st.success(LANG["create_success"].format(new_class.strip()))
-                        time.sleep(0.5)
-                        st.rerun()
-                    except Exception:
-                        st.error(LANG["add_error"])
-                else:
-                    os.makedirs(os.path.join(DB_PATH, new_class.strip()))
+                elif add_class(new_class.strip()):
                     st.success(LANG["create_success"].format(new_class.strip()))
+                    st.cache_resource.clear()
                     time.sleep(0.5)
                     st.rerun()
+                else:
+                    st.error(LANG["add_error"])
             else:
                 st.warning(LANG["create_warning"])
 
@@ -828,18 +1281,7 @@ with st.sidebar:
                 ckey = f"confirm_{cl}"
                 if st.session_state.get(ckey, False):
                     if col2.button(LANG["confirm_delete"], key=f"yes_{cl}"):
-                        if cloud_enabled():
-                            try:
-                                requests.delete(f"{SUPABASE_URL}/rest/v1/students",
-                                                params={"class_name": f"eq.{cl}"},
-                                                headers=_rest_headers(), timeout=10)
-                                requests.delete(f"{SUPABASE_URL}/rest/v1/classes",
-                                                params={"name": f"eq.{cl}"},
-                                                headers=_rest_headers(), timeout=10)
-                            except Exception:
-                                pass
-                        else:
-                            shutil.rmtree(os.path.join(DB_PATH, cl), ignore_errors=True)
+                        delete_class(cl)
                         st.session_state.pop(ckey, None)
                         st.cache_resource.clear()
                         st.rerun()
@@ -914,6 +1356,8 @@ with st.sidebar:
     camera_mode = "user" if selected_cam == LANG["cam_front"] else "environment"
 
     st.caption(f"{LANG['students_count']}: {len(all_students_names())} | {LANG['date']}: {TODAY}")
+    sync_label = LANG["sync_cloud"] if cloud_enabled() else LANG["sync_local"]
+    st.caption(f"{LANG['sync_status']}: {sync_label}")
 
 
 # ============================================================
@@ -950,19 +1394,15 @@ def load_known_encodings():
             pass
         return encodings, names
 
-    image_exts = ('.jpg', '.jpeg', '.png')
-    for f in os.listdir(DB_PATH):
-        full = os.path.join(DB_PATH, f)
-        if os.path.isfile(full) and f.lower().endswith(image_exts) and not f.startswith('.'):
-            name = os.path.splitext(f)[0]
-            _add_encoding(full, name, encodings, names)
-    for cl in get_classes():
-        cl_dir = os.path.join(DB_PATH, cl)
-        for f in os.listdir(cl_dir):
-            full = os.path.join(cl_dir, f)
-            if os.path.isfile(full) and f.lower().endswith(image_exts):
-                name = os.path.splitext(f)[0]
-                _add_encoding(full, name, encodings, names)
+    for s in _load_manifest().get("students", []):
+        name = s.get("name")
+        for p in s.get("photos", []):
+            feat = p.get("feature")
+            if feat:
+                encodings.append(np.array(feat, dtype=np.float32))
+                names.append(name)
+            else:
+                _add_encoding(os.path.join(PHOTOS_DIR, p.get("file", "")), name, encodings, names)
     return encodings, names
 
 
@@ -1070,6 +1510,20 @@ def make_video_processor(lang_code, motion_threshold):
 # ============================================================
 # منطقة الكاميرا
 # ============================================================
+def get_ice_servers():
+    """يضيف STUN دائماً، وTURN من Secrets إن وُجد (لتحسين الاتصال عبر الشبكات المقيّدة)."""
+    servers = [{"urls": ["stun:stun.l.google.com:19302"]}]
+    try:
+        turn_url = st.secrets.get("TURN_URL")
+        turn_user = st.secrets.get("TURN_USERNAME")
+        turn_cred = st.secrets.get("TURN_CREDENTIAL")
+        if turn_url:
+            servers.append({"urls": [turn_url], "username": turn_user or "", "credential": turn_cred or ""})
+    except Exception:
+        pass
+    return servers
+
+
 st.markdown(f"## {LANG['live_camera']}")
 st.caption(LANG["live_hint"])
 
@@ -1080,7 +1534,33 @@ webrtc_streamer(
         "video": {"facingMode": camera_mode},
         "audio": False,
     },
-    rtc_configuration={
-        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-    },
+    rtc_configuration={"iceServers": get_ice_servers()},
 )
+
+# ============================================================
+# تقرير الفترة (أسبوعي/شهري)
+# ============================================================
+st.divider()
+st.markdown(f"## {LANG['report_range']}")
+
+default_start = (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d")
+col_from, col_to = st.columns(2)
+with col_from:
+    start_date = st.date_input(LANG["report_from"], value=datetime.strptime(default_start, "%Y-%m-%d"))
+with col_to:
+    end_date = st.date_input(LANG["report_to"], value=datetime.now())
+
+df_range = generate_range_report(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"),
+                                 st.session_state.lang_code)
+if df_range.empty:
+    st.info(LANG["range_empty"])
+else:
+    st.dataframe(df_range, use_container_width=True, hide_index=True)
+    buf_range = io.BytesIO()
+    df_range.to_excel(buf_range, index=False, engine="openpyxl")
+    st.download_button(
+        label=LANG["download_range"],
+        data=buf_range.getvalue(),
+        file_name=f"report_{start_date.strftime('%Y-%m-%d')}_{end_date.strftime('%Y-%m-%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
