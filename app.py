@@ -2,12 +2,14 @@ import streamlit as st
 import cv2
 import os
 import io
+import json
 import hmac
 import time
 import shutil
 import numpy as np
 import pandas as pd
 from datetime import datetime
+import requests
 import av
 from streamlit_webrtc import webrtc_streamer
 
@@ -24,12 +26,95 @@ PLATFORM_NAME = "Tarek Platform"
 PLATFORM_NAME_AR = "منصة طارق"
 
 # ============================================================
+# طبقة التخزين: Supabase (سحابي متزامن) + نمط احتياطي محلي تلقائي
+# ============================================================
+SUPABASE_URL = None
+SUPABASE_KEY = None
+PHOTO_BUCKET = "student-photos"
+
+
+def init_storage():
+    """يقرأ مفاتيح Supabase من Secrets؛ إن غابت تعمل البيانات محلياً."""
+    global SUPABASE_URL, SUPABASE_KEY
+    try:
+        SUPABASE_URL = st.secrets.get("SUPABASE_URL")
+        SUPABASE_KEY = st.secrets.get("SUPABASE_SERVICE_KEY")
+    except Exception:
+        SUPABASE_URL = None
+        SUPABASE_KEY = None
+
+
+def cloud_enabled():
+    return bool(SUPABASE_URL and SUPABASE_KEY)
+
+
+def _rest_headers():
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+def cloud_add_student(name, class_name, image_bytes, ext):
+    """يرفع صورة الطالب ويخزّن بصمته في Supabase: (نجاح, رمز_الحالة)."""
+    img = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return False, "cv2_fail"
+    feat = face_feature_from_image(img)
+    if feat is None:
+        return False, "no_face"
+
+    if class_name:
+        try:
+            requests.post(
+                f"{SUPABASE_URL}/rest/v1/classes",
+                json={"name": class_name},
+                headers={**_rest_headers(), "Prefer": "resolution=ignore-duplicates,return=minimal"},
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+    object_path = f"{int(time.time() * 1000)}_{name.replace(' ', '_')}{ext}"
+    hdrs = _rest_headers()
+    hdrs["Content-Type"] = "image/jpeg"
+    try:
+        r = requests.post(
+            f"{SUPABASE_URL}/storage/v1/object/{PHOTO_BUCKET}/{object_path}",
+            data=image_bytes, headers=hdrs, timeout=30,
+        )
+        if r.status_code not in (200, 201, 204):
+            return False, "upload"
+    except Exception:
+        return False, "upload"
+
+    payload = {
+        "name": name,
+        "class_name": class_name or None,
+        "photo": object_path,
+        "feature": json.dumps(np.asarray(feat, dtype=float).tolist()),
+    }
+    try:
+        r2 = requests.post(
+            f"{SUPABASE_URL}/rest/v1/students",
+            json=payload,
+            headers={**_rest_headers(), "Prefer": "return=representation"},
+            timeout=15,
+        )
+        if r2.status_code not in (200, 201):
+            return False, "insert"
+    except Exception:
+        return False, "insert"
+    return True, "ok"
+
+# ============================================================
 # نماذج OpenCV (YuNet للكشف + SFace للتعرف) — بدون حاجة لـ dlib
 # ============================================================
 MODELS_DIR = "models"
 FACE_DETECTOR = None
 FACE_RECOGNIZER = None
-FACE_MATCH_THRESHOLD = 0.36
+FACE_MATCH_THRESHOLD = 0.40
 
 
 def ensure_models():
@@ -76,6 +161,8 @@ LANGUAGES = {
         "add_success": "تمت إضافة {} في {} بنجاح!",
         "add_duplicate": "يوجد طالب بهذا الاسم بالفعل. استخدم اسماً مختلفاً.",
         "add_warning": "الرجاء إدخال الاسم واختيار صورة.",
+        "no_face_found": "لم يُعثر على وجه واضح في الصورة — جرّب صورة أوضح ومباشرة.",
+        "add_error": "تعذّرت الإضافة — تحقّق من الاتصال بالسحابة وحاول مجدداً.",
         "new_class_label": "اسم الصف الجديد",
         "create_btn": "إنشاء الصف",
         "create_success": "تم إنشاء الصف: {}",
@@ -114,6 +201,27 @@ LANGUAGES = {
         "camera_label": "مصدر الكاميرا",
         "cam_front": "الكاميرا الأمامية",
         "cam_back": "الكاميرا الخلفية",
+        "cam_external": "الكاميرا الخارجية (USB)",
+        "welcome_title": "أهلاً وسهلاً في منصة طارق",
+        "welcome_sub": "قف أمام الكاميرا وسيُسجَّل حضورك تلقائياً — لا حاجة لأي إجراء آخر",
+        "about_title": "عن المنصة",
+        "about_desc": "منصة ذكية تعتمد تقنية التعرف على الوجوه: تكشف وجه الطالب، تتحقق من هويته، وتُسجّل حضوره فوراً في سجل اليوم، ثم تُصدّر تقرير Excel بالحاضرين والغائبين.",
+        "how_works_title": "كيف يعمل النظام؟",
+        "how_works": [
+            "1️⃣ افتح التطبيق من هاتفك أو حاسوبك وادخل بحسابك",
+            "2️⃣ اضغط زر التشغيل واسمح للتطبيق باستخدام الكاميرا",
+            "3️⃣ قف أمام الكاميرا — سيظهر صندوق أخضر يتبع وجهك",
+            "4️⃣ بمجرد التعرف عليك، يُسجَّل حضورك تلقائياً",
+            "5️⃣ شاهد ملخص الحضور ثم صدّر تقرير Excel من الزر أدناه"
+        ],
+        "cam_external_hint": "اختر هذا الخيار إذا كنت تستخدم حاسوباً مع كاميرا خارجية — ثم اختر الكاميرا المتصلة من شريط أدوات البث.",
+        "summary_title": "ملخص الجلسة",
+        "summary_present": "حاضر",
+        "summary_absent": "غائب",
+        "summary_interim": "يتحدّث الملخص عند أي تفاعل — اضغط زر التحديث لرؤية أحدث حالة.",
+        "summary_refresh": "🔄 تحديث الملخص",
+        "summary_empty": "لم يُسجَّل أي حضور بعد — قف أمام الكاميرا واضغط زر التشغيل.",
+        "summary_export_btn": "⬇️ تصدير تقرير Excel لليوم",
         "login_title": "تسجيل الدخول",
         "login_sub": "هذه المنصة محمية — أدخل كلمة سر المطوّر",
         "password_label": "كلمة السر",
@@ -141,6 +249,8 @@ LANGUAGES = {
         "add_success": "{} added to {} successfully!",
         "add_duplicate": "A student with this name already exists. Use a different one.",
         "add_warning": "Please enter a name and choose a photo.",
+        "no_face_found": "No clear face found in the photo — try a clearer, front-facing image.",
+        "add_error": "Add failed — check the cloud connection and try again.",
         "new_class_label": "New Class Name",
         "create_btn": "Create Class",
         "create_success": "Class created: {}",
@@ -325,7 +435,17 @@ def inject_css(is_dark, lang_code="ar"):
 # دوال مساعدة للتعامل مع المجلدات (التشعيب)
 # ============================================================
 def get_classes():
-    """يعيد قائمة الصفوف (المجلدات) داخل faces_db."""
+    """يعيد قائمة الصفوف — من Supabase أو من المجلدات محلياً."""
+    if cloud_enabled():
+        try:
+            r = requests.get(f"{SUPABASE_URL}/rest/v1/classes",
+                             params={"select": "name", "order": "name.asc"},
+                             headers=_rest_headers(), timeout=10)
+            if r is not None and r.status_code == 200:
+                return sorted({row.get("name") for row in r.json() if row.get("name")})
+        except Exception:
+            pass
+        return []
     classes = [d for d in os.listdir(DB_PATH)
                if os.path.isdir(os.path.join(DB_PATH, d)) and not d.startswith('.')]
     return sorted(classes)
@@ -333,9 +453,31 @@ def get_classes():
 
 def get_students_in_class(class_name=None):
     """
-    class_name=None -> كل الصفوف + الطلاب بدون تصنيف (في الجذر).
+    class_name=None -> كل الصفوف + الطلاب بدون تصنيف.
+    class_name="__root__" -> الطلاب بدون تصنيف فقط.
     يعيد قائمة tuples: (student_name, class_name_or_None)
     """
+    if cloud_enabled():
+        try:
+            r = requests.get(f"{SUPABASE_URL}/rest/v1/students",
+                             params={"select": "name,class_name", "order": "name.asc"},
+                             headers=_rest_headers(), timeout=10)
+            if r is not None and r.status_code == 200:
+                out = []
+                for row in r.json():
+                    cl = row.get("class_name") or None
+                    if class_name is None:
+                        out.append((row["name"], cl))
+                    elif class_name == "__root__":
+                        if cl is None:
+                            out.append((row["name"], None))
+                    elif cl == class_name:
+                        out.append((row["name"], cl))
+                return out
+        except Exception:
+            pass
+        return []
+
     students = []
     image_exts = ('.jpg', '.jpeg', '.png')
 
@@ -391,16 +533,49 @@ def init_log_db():
 
 
 def log_attendance(name):
-    conn = sqlite3_connect()
-    c = conn.cursor()
+    """يسجّل الحضور مرة واحدة لكل طالب في اليوم (لا تكرار أبداً)."""
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
+    if cloud_enabled():
+        try:
+            requests.post(
+                f"{SUPABASE_URL}/rest/v1/attendance",
+                params={"on_conflict": "student_name,date"},
+                json={"student_name": name, "time": now.strftime("%H:%M:%S"), "date": today},
+                headers={**_rest_headers(), "Prefer": "resolution=ignore-duplicates,return=minimal"},
+                timeout=10,
+            )
+        except Exception:
+            pass
+        return
+    conn = sqlite3_connect()
+    c = conn.cursor()
     c.execute("SELECT id FROM attendance WHERE student_name = ? AND date = ?", (name, today))
     if not c.fetchone():
         c.execute("INSERT INTO attendance (student_name, time, date) VALUES (?, ?, ?)",
                   (name, now.strftime("%H:%M:%S"), today))
         conn.commit()
     conn.close()
+
+
+def get_today_present():
+    """يعيد قائمة (الاسم, وقت الدخول) للحاضرين اليوم."""
+    if cloud_enabled():
+        try:
+            r = requests.get(f"{SUPABASE_URL}/rest/v1/attendance",
+                             params={"select": "student_name,time", "date": f"eq.{TODAY}", "order": "time.asc"},
+                             headers=_rest_headers(), timeout=10)
+            if r is not None and r.status_code == 200:
+                return [(row.get("student_name"), row.get("time") or "") for row in r.json()]
+        except Exception:
+            pass
+        return []
+    conn = sqlite3_connect()
+    c = conn.cursor()
+    c.execute("SELECT student_name, time FROM attendance WHERE date = ? ORDER BY time", (TODAY,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
 
 
 # ============================================================
@@ -479,6 +654,8 @@ try:
 except Exception:
     AUTH_PASSWORD = None
 
+init_storage()
+
 
 def render_login_gate():
     """يعرض شاشة الدخول ويوقف التطبيق حتى إدخال كلمة السر الصحيحة."""
@@ -528,7 +705,7 @@ st.markdown(f"""
     <div>
         <p class="hero-title">{LANG['title']}</p>
         <p class="hero-sub">{LANG['subtitle']}</p>
-        <span class="badge">🟢 Online &nbsp;|&nbsp; {TODAY}</span>
+        <span class="badge">🟢 Online &nbsp;|&nbsp; v2.0 &nbsp;|&nbsp; {TODAY}</span>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -580,16 +757,31 @@ with st.sidebar:
 
         if st.button(LANG["add_btn"]):
             if new_name.strip() and uploaded_file:
-                ext = os.path.splitext(uploaded_file.name)[1].lower()
-                if selected_class == LANG["untracked"]:
-                    target_dir = DB_PATH
-                else:
-                    target_dir = os.path.join(DB_PATH, selected_class)
-                    os.makedirs(target_dir, exist_ok=True)
-                save_path = os.path.join(target_dir, f"{new_name.strip()}{ext}")
-                if os.path.exists(save_path):
+                image_bytes = uploaded_file.getbuffer()
+                ext = os.path.splitext(uploaded_file.name)[1].lower() or ".jpg"
+                target_class = None if selected_class == LANG["untracked"] else selected_class
+
+                existing = [n for n, _ in get_students_in_class("__root__" if target_class is None else target_class)]
+                if new_name.strip() in existing:
                     st.warning(LANG["add_duplicate"])
+                elif cloud_enabled():
+                    ok, status = cloud_add_student(new_name.strip(), target_class, image_bytes, ext)
+                    if status == "no_face":
+                        st.warning(LANG["no_face_found"])
+                    elif ok:
+                        st.success(LANG["add_success"].format(new_name.strip(), selected_class))
+                        st.cache_resource.clear()
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(LANG["add_error"])
                 else:
+                    if target_class is None:
+                        target_dir = DB_PATH
+                    else:
+                        target_dir = os.path.join(DB_PATH, target_class)
+                        os.makedirs(target_dir, exist_ok=True)
+                    save_path = os.path.join(target_dir, f"{new_name.strip()}{ext}")
                     with open(save_path, "wb") as f:
                         f.write(uploaded_file.getbuffer())
                     st.success(LANG["add_success"].format(new_name.strip(), selected_class))
@@ -605,11 +797,19 @@ with st.sidebar:
         new_class = st.text_input(LANG["new_class_label"])
         if st.button(LANG["create_btn"]):
             if new_class.strip():
-                cd = os.path.join(DB_PATH, new_class.strip())
-                if os.path.exists(cd):
+                if new_class.strip() in get_classes():
                     st.warning(LANG["create_duplicate"])
+                elif cloud_enabled():
+                    try:
+                        requests.post(f"{SUPABASE_URL}/rest/v1/classes", json={"name": new_class.strip()},
+                                      headers={**_rest_headers(), "Prefer": "return=representation"}, timeout=10)
+                        st.success(LANG["create_success"].format(new_class.strip()))
+                        time.sleep(0.5)
+                        st.rerun()
+                    except Exception:
+                        st.error(LANG["add_error"])
                 else:
-                    os.makedirs(cd)
+                    os.makedirs(os.path.join(DB_PATH, new_class.strip()))
                     st.success(LANG["create_success"].format(new_class.strip()))
                     time.sleep(0.5)
                     st.rerun()
@@ -628,7 +828,18 @@ with st.sidebar:
                 ckey = f"confirm_{cl}"
                 if st.session_state.get(ckey, False):
                     if col2.button(LANG["confirm_delete"], key=f"yes_{cl}"):
-                        shutil.rmtree(os.path.join(DB_PATH, cl), ignore_errors=True)
+                        if cloud_enabled():
+                            try:
+                                requests.delete(f"{SUPABASE_URL}/rest/v1/students",
+                                                params={"class_name": f"eq.{cl}"},
+                                                headers=_rest_headers(), timeout=10)
+                                requests.delete(f"{SUPABASE_URL}/rest/v1/classes",
+                                                params={"name": f"eq.{cl}"},
+                                                headers=_rest_headers(), timeout=10)
+                            except Exception:
+                                pass
+                        else:
+                            shutil.rmtree(os.path.join(DB_PATH, cl), ignore_errors=True)
                         st.session_state.pop(ckey, None)
                         st.cache_resource.clear()
                         st.rerun()
@@ -710,7 +921,7 @@ with st.sidebar:
 # ============================================================
 def _add_encoding(path, name, encodings, names):
     try:
-        img = cv2.imread(path)
+        img = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             return
         feat = face_feature_from_image(img)
@@ -725,6 +936,20 @@ def _add_encoding(path, name, encodings, names):
 def load_known_encodings():
     encodings = []
     names = []
+    if cloud_enabled():
+        try:
+            r = requests.get(f"{SUPABASE_URL}/rest/v1/students",
+                             params={"select": "name,feature"},
+                             headers=_rest_headers(), timeout=15)
+            if r is not None and r.status_code == 200:
+                for row in r.json():
+                    if row.get("feature"):
+                        encodings.append(np.array(json.loads(row["feature"]), dtype=np.float32))
+                        names.append(row["name"])
+        except Exception:
+            pass
+        return encodings, names
+
     image_exts = ('.jpg', '.jpeg', '.png')
     for f in os.listdir(DB_PATH):
         full = os.path.join(DB_PATH, f)
