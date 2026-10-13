@@ -234,7 +234,12 @@ def cloud_add_student(name, class_name, student_id, files):
     for (data, ext), feat in zip(files, feats):
         object_path = f"{uuid.uuid4().hex[:12]}{ext or '.jpg'}"
         hdrs = _rest_headers()
-        hdrs["Content-Type"] = "image/jpeg"
+        mime = "image/jpeg"
+        if ext and ext.lower() in (".png",):
+            mime = "image/png"
+        elif ext and ext.lower() in (".webp",):
+            mime = "image/webp"
+        hdrs["Content-Type"] = mime
         try:
             r = requests.post(
                 f"{SUPABASE_URL}/storage/v1/object/{PHOTO_BUCKET}/{object_path}",
@@ -402,6 +407,8 @@ MODELS_DIR = "models"
 FACE_DETECTOR = None
 FACE_RECOGNIZER = None
 FACE_MATCH_THRESHOLD = 0.40
+# نصف قطر الربط بين إطارين متتاليين (بكسل) لاعتبار الوجه نفس الشخص
+FACE_TRACK_RADIUS = 160.0
 
 
 def ensure_models():
@@ -489,6 +496,14 @@ LANGUAGES = {
         "cam_front": "الكاميرا الأمامية",
         "cam_back": "الكاميرا الخلفية",
         "cam_external": "الكاميرا الخارجية (USB)",
+        "cam_mode_label": "طريقة الكاميرا",
+        "cam_mode_device": "كاميرا الجهاز / الويب كام",
+        "cam_mode_url": "كاميرا خارجية بالرابط (IP)",
+        "cam_url_label": "رابط الكاميرا (RTSP / HTTP-MJPEG)",
+        "cam_url_hint": "الصق رابط الكاميرا، مثال: rtsp://user:pass@192.168.1.10:554/stream  أو  http://192.168.1.10:8080/video",
+        "cam_url_start": "▶️ تشغيل بث الكاميرا",
+        "cam_url_stop": "⏹ إيقاف البث",
+        "cam_url_invalid": "تعذّر الاتصال بالكاميرا — تحقّق من الرابط.",
         "welcome_title": "أهلاً وسهلاً في منصة طارق",
         "welcome_sub": "قف أمام الكاميرا وسيُسجَّل حضورك تلقائياً — لا حاجة لأي إجراء آخر",
         "about_title": "عن المنصة",
@@ -605,6 +620,14 @@ LANGUAGES = {
         "camera_label": "Camera Source",
         "cam_front": "Front Camera",
         "cam_back": "Back Camera",
+        "cam_mode_label": "Camera Mode",
+        "cam_mode_device": "Device / Webcam",
+        "cam_mode_url": "External camera by URL (IP)",
+        "cam_url_label": "Camera URL (RTSP / HTTP-MJPEG)",
+        "cam_url_hint": "Paste the camera URL, e.g. rtsp://user:pass@192.168.1.10:554/stream or http://192.168.1.10:8080/video",
+        "cam_url_start": "▶️ Start camera stream",
+        "cam_url_stop": "⏹ Stop stream",
+        "cam_url_invalid": "Could not connect to the camera — check the URL.",
         "login_title": "Login",
         "login_sub": "This platform is protected — enter the developer password",
         "password_label": "Password",
@@ -764,6 +787,17 @@ def inject_css(is_dark, lang_code="ar"):
         background: var(--card);
         border-right: 1px solid var(--border);
     }}
+    /* إزالة الخط/الإطار الطويل حول مشغّل الكاميرا */
+    iframe[title="streamlit_webrtc.component"],
+    div[data-testid="stCustomComponentV1"],
+    div[data-testid="stCustomComponentV1"] > div {{
+        border: none !important;
+        outline: none !important;
+        box-shadow: none !important;
+    }}
+    iframe[title="streamlit_webrtc.component"] {{
+        border-bottom: 0 !important;
+    }}
     /* إعداد اتجاه النص حسب اللغة */
     .stApp, .stSidebar, .stMarkdown {{
         direction: {direction};
@@ -771,6 +805,80 @@ def inject_css(is_dark, lang_code="ar"):
     }}
     .hero {{
         direction: {direction};
+    }}
+    /* Mobile Responsive */
+    @media (max-width: 768px) {{
+        .block-container {{
+            padding-top: 1rem;
+            padding-bottom: 1rem;
+            padding-left: 0.5rem;
+            padding-right: 0.5rem;
+        }}
+        .hero {{
+            padding: 1.2rem 1rem;
+            flex-direction: column;
+            text-align: center;
+            border-radius: 12px;
+        }}
+        .hero-title {{
+            font-size: 1.4rem;
+        }}
+        .hero-sub {{
+            font-size: 0.85rem;
+        }}
+        .hero-logo {{
+            font-size: 2rem;
+        }}
+        .card {{
+            padding: 0.8rem;
+            border-radius: 10px;
+        }}
+        .metric-card {{
+            padding: 0.7rem;
+        }}
+        .metric-value {{
+            font-size: 1.6rem;
+        }}
+        .stButton>button {{
+            padding: 0.6rem 1rem;
+            font-size: 0.9rem;
+        }}
+        .stTextInput>div>div>input, .stSelectbox>div>div {{
+            font-size: 1rem;
+        }}
+        [data-testid="stSidebar"] {{
+            min-width: 100%;
+        }}
+        .stTabs [data-baseweb="tab-list"] {{
+            gap: 0.3rem;
+        }}
+        .stTabs [data-baseweb="tab"] {{
+            padding: 0.5rem 0.8rem;
+            font-size: 0.85rem;
+        }}
+        video {{
+            width: 100% !important;
+            height: auto !important;
+        }}
+        .stDataFrame {{
+            font-size: 0.8rem;
+        }}
+    }}
+    /* Touch-friendly */
+    @media (hover: none) and (pointer: coarse) {{
+        .stButton>button {{
+            min-height: 44px;
+        }}
+        .stSelectbox>div>div, .stTextInput>div>div>input {{
+            min-height: 44px;
+        }}
+    }}
+    /* Landscape phone */
+    @media (max-width: 768px) and (orientation: landscape) {{
+        .hero {{
+            flex-direction: row;
+            padding: 1rem 1.5rem;
+        }}
     }}
     </style>
     """, unsafe_allow_html=True)
@@ -873,15 +981,17 @@ def log_attendance(name):
     today = now.strftime("%Y-%m-%d")
     if cloud_enabled():
         try:
-            requests.post(
+            r = requests.post(
                 f"{SUPABASE_URL}/rest/v1/attendance",
                 params={"on_conflict": "student_name,date"},
                 json={"student_name": name, "time": now.strftime("%H:%M:%S"), "date": today},
                 headers={**_rest_headers(), "Prefer": "resolution=ignore-duplicates,return=minimal"},
                 timeout=10,
             )
-        except Exception:
-            pass
+            if r.status_code not in (200, 201, 204):
+                print(f"Attendance log failed: {r.status_code} {r.text}")
+        except Exception as e:
+            print(f"Attendance log error: {e}")
         return
     conn = sqlite3_connect()
     c = conn.cursor()
@@ -1063,7 +1173,6 @@ def render_login_gate():
         </div>
         """, unsafe_allow_html=True)
         st.stop()
-        return
     st.markdown(f"""
     <div class="hero">
         <div class="hero-logo">🔐</div>
@@ -1299,13 +1408,14 @@ with st.sidebar:
     # ===== سجل اليوم =====
     st.markdown(f"### {LANG['today_log']}")
     classes = get_classes()
-    filter_options = [LANG["all_classes"], LANG["untracked"]] + classes
-    filter_class = st.selectbox(LANG["filter_by_class"], filter_options)
+    filter_keys = ["all", "untracked"] + classes
+    filter_labels = {k: (LANG["all_classes"] if k == "all" else LANG["untracked"] if k == "untracked" else k) for k in filter_keys}
+    filter_class_key = st.selectbox(LANG["filter_by_class"], filter_keys, format_func=lambda k: filter_labels[k])
 
-    if filter_class == LANG["all_classes"]:
+    if filter_class_key == "all":
         df_today = generate_excel(TODAY, st.session_state.lang_code)
     else:
-        map_val = "__root__" if filter_class == LANG["untracked"] else filter_class
+        map_val = None if filter_class_key == "untracked" else filter_class_key
         df_today = generate_excel_for_class(TODAY, map_val, st.session_state.lang_code)
 
     col_status = LANG["col_status"]
@@ -1330,10 +1440,10 @@ with st.sidebar:
 
     # زر تنزيل Excel
     if st.button(LANG["download_excel"]):
-        if filter_class == LANG["all_classes"]:
+        if filter_class_key == "all":
             df = generate_excel(TODAY, st.session_state.lang_code)
         else:
-            map_val = "__root__" if filter_class == LANG["untracked"] else filter_class
+            map_val = None if filter_class_key == "untracked" else filter_class_key
             df = generate_excel_for_class(TODAY, map_val, st.session_state.lang_code)
         if df.empty:
             st.warning(LANG["no_data"])
@@ -1351,9 +1461,20 @@ with st.sidebar:
 
     # إعدادات الكاميرا: الحساسية + مصدر الكاميرا
     motion_threshold = st.slider(LANG["motion_threshold"], 1.0, 30.0, 8.0, 0.5)
-    cam_options = [LANG["cam_front"], LANG["cam_back"]]
-    selected_cam = st.selectbox(LANG["camera_label"], cam_options)
-    camera_mode = "user" if selected_cam == LANG["cam_front"] else "environment"
+    cam_mode_options = [LANG["cam_mode_device"], LANG["cam_mode_url"]]
+    cam_mode_sel = st.radio(LANG["cam_mode_label"], cam_mode_options, horizontal=True)
+    camera_url = ""
+    camera_mode = "user"
+    if cam_mode_sel == LANG["cam_mode_url"]:
+        camera_url = st.text_input(LANG["cam_url_label"], value=st.session_state.get("cam_url", ""))
+        st.session_state["cam_url"] = camera_url
+        st.caption(LANG["cam_url_hint"])
+        camera_source_mode = "url"
+    else:
+        cam_options = [LANG["cam_front"], LANG["cam_back"]]
+        selected_cam = st.selectbox(LANG["camera_label"], cam_options)
+        camera_mode = "user" if selected_cam == LANG["cam_front"] else "environment"
+        camera_source_mode = "device"
 
     st.caption(f"{LANG['students_count']}: {len(all_students_names())} | {LANG['date']}: {TODAY}")
     sync_label = LANG["sync_cloud"] if cloud_enabled() else LANG["sync_local"]
@@ -1418,9 +1539,102 @@ class _SessionState:
         self.lang_code = lang_code
         self.motion_threshold = motion_threshold
         self.last_time = 0.0
-        self.prev_center = None
-        self.first_face = True
+        self.prev_centers = []
         self.process_interval = 2.0
+
+    def update_threshold(self, new_threshold):
+        self.motion_threshold = new_threshold
+
+
+def analyze_bgr(img, state):
+    """يعالج إطار BGR واحد ويعيد الإطار بعد الرسم.
+
+    يعالج كل الوجوه في الإطار (وليس وجهاً واحداً)، مع تتبّع حركة مستقل لكل وجه
+    (مضاد الاحتيال). مشتركة بين كاميرا الجهاز (webrtc) والكاميرا الخارجية بالرابط.
+    """
+    now = time.time()
+    if now - state.last_time <= state.process_interval:
+        return img
+    state.last_time = now
+
+    detector, recognizer = ensure_models()
+    h, w = img.shape[:2]
+    detector.setInputSize((w, h))
+    _, faces = detector.detect(img)
+
+    lang = LANGUAGES[state.lang_code]
+    scanning_text = lang["scanning"]
+
+    if faces is None or len(faces) == 0:
+        state.prev_centers = []
+        cv2.putText(img, scanning_text, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+        return img
+
+    prev = state.prev_centers
+    used = [False] * len(prev)
+    cur_centers = []
+    live_suffix = lang["live_suffix"]
+    photo_text = lang["photo_text"]
+
+    for face in faces:
+        fx, fy, fw, fh = face[:4]
+        left = int(fx)
+        top = int(fy)
+        right = int(fx + fw)
+        bottom = int(fy + fh)
+        center = ((left + right) / 2.0, (top + bottom) / 2.0)
+        cur_centers.append(center)
+
+        aligned = recognizer.alignCrop(img, face)
+        face_encoding = recognizer.feature(aligned)
+
+        # ربط الوجه بأقرب وجه في الإطار السابق لتقدير حركته
+        best_idx, best_d = -1, float("inf")
+        for i, pc in enumerate(prev):
+            if used[i]:
+                continue
+            d = ((center[0] - pc[0]) ** 2 + (center[1] - pc[1]) ** 2) ** 0.5
+            if d < best_d:
+                best_d, best_idx = d, i
+        first_appearance = best_idx < 0 or best_d > FACE_TRACK_RADIUS
+        if best_idx >= 0:
+            used[best_idx] = True
+        is_live = (not first_appearance) and best_d > state.motion_threshold
+
+        # التعرف على الوجه
+        if len(known_encodings) > 0:
+            best_sim = -1.0
+            best_name = "Unknown"
+            for known_feat, known_name in zip(known_encodings, known_names):
+                sim = recognizer.match(face_encoding, known_feat)
+                if sim > best_sim:
+                    best_sim = sim
+                    best_name = known_name
+            name = best_name if best_sim >= FACE_MATCH_THRESHOLD else "Unknown"
+        else:
+            name = "Unknown"
+
+        # أول ظهور للوجه: نعرض الاسم بدل اتهامه بأنه صورة (لا تسجيل)
+        if first_appearance:
+            color = (0, 255, 0) if name != "Unknown" else (255, 255, 255)
+            label = name if name != "Unknown" else scanning_text
+        elif is_live:
+            if name != "Unknown":
+                color = (0, 255, 0)
+                label = f"{name} {live_suffix}"
+                log_attendance(name)
+            else:
+                color = (0, 255, 255)
+                label = f"Unknown {live_suffix}"
+        else:
+            color = (0, 0, 255)
+            label = f"{photo_text} {name}"
+
+        cv2.rectangle(img, (left, top), (right, bottom), color, 2)
+        cv2.putText(img, label, (left, max(25, top - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+    state.prev_centers = cur_centers
+    return img
 
 
 def make_video_processor(lang_code, motion_threshold):
@@ -1429,79 +1643,7 @@ def make_video_processor(lang_code, motion_threshold):
 
     def video_frame_callback(frame):
         img = frame.to_ndarray(format="bgr24")
-
-        now = time.time()
-        if now - state.last_time > state.process_interval:
-            state.last_time = now
-
-            detector, recognizer = ensure_models()
-            h, w = img.shape[:2]
-            detector.setInputSize((w, h))
-            _, faces = detector.detect(img)
-
-            scanning_text = LANGUAGES[state.lang_code]["scanning"]
-
-            if faces is None or len(faces) == 0:
-                state.prev_center = None
-                state.first_face = True
-                cv2.putText(img, scanning_text, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-                return av.VideoFrame.from_ndarray(img, format="bgr24")
-
-            face = faces[0]
-            fx, fy, fw, fh = face[:4]
-            left = int(fx)
-            top = int(fy)
-            right = int(fx + fw)
-            bottom = int(fy + fh)
-            center = ((left + right) / 2, (top + bottom) / 2)
-
-            aligned = recognizer.alignCrop(img, face)
-            face_encoding = recognizer.feature(aligned)
-
-            # كشف الحركة (مضاد الاحتيال)
-            is_live = False
-            if state.prev_center is not None:
-                dist = np.sqrt((center[0] - state.prev_center[0]) ** 2 + (center[1] - state.prev_center[1]) ** 2)
-                if dist > state.motion_threshold:
-                    is_live = True
-            state.prev_center = center
-
-            # التعرف على الوجه
-            if len(known_encodings) > 0:
-                best_sim = -1.0
-                best_name = "Unknown"
-                for known_feat, known_name in zip(known_encodings, known_names):
-                    sim = recognizer.match(face_encoding, known_feat)
-                    if sim > best_sim:
-                        best_sim = sim
-                        best_name = known_name
-                name = best_name if best_sim >= FACE_MATCH_THRESHOLD else "Unknown"
-            else:
-                name = "Unknown"
-
-            live_suffix = LANGUAGES["en"]["live_suffix"]
-            photo_text = LANGUAGES["en"]["photo_text"]
-
-            # أول كشف للوجه: نعرض الاسم بدل اتهامه بأنه صورة
-            if state.first_face:
-                state.first_face = False
-                color = (0, 255, 0)
-                label = name if name != "Unknown" else scanning_text
-            elif is_live:
-                if name != "Unknown":
-                    color = (0, 255, 0)
-                    label = f"{name} {live_suffix}"
-                    log_attendance(name)
-                else:
-                    color = (0, 255, 255)
-                    label = f"Unknown {live_suffix}"
-            else:
-                color = (0, 0, 255)
-                label = f"{photo_text} {name}"
-
-            cv2.rectangle(img, (left, top), (right, bottom), color, 2)
-            cv2.putText(img, label, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
-
+        img = analyze_bgr(img, state)
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
     return video_frame_callback
@@ -1525,17 +1667,60 @@ def get_ice_servers():
 
 
 st.markdown(f"## {LANG['live_camera']}")
-st.caption(LANG["live_hint"])
 
-webrtc_streamer(
-    key="tarek-face-recognition",
-    video_frame_callback=make_video_processor(st.session_state.lang_code, motion_threshold),
-    media_stream_constraints={
-        "video": {"facingMode": camera_mode},
-        "audio": False,
-    },
-    rtc_configuration={"iceServers": get_ice_servers()},
-)
+if camera_source_mode == "url":
+    st.caption(LANG["cam_url_hint"])
+    col_start, col_stop = st.columns(2)
+    if col_start.button(LANG["cam_url_start"], use_container_width=True):
+        st.session_state["ext_running"] = True
+    if col_stop.button(LANG["cam_url_stop"], use_container_width=True):
+        st.session_state["ext_running"] = False
+        st.session_state["ext_cap"] = None
+        st.session_state["ext_state"] = None
+
+    if st.session_state.get("ext_running") and camera_url:
+        holder = st.empty()
+        cap = st.session_state.get("ext_cap")
+        if cap is None:
+            cap = cv2.VideoCapture(camera_url)
+            st.session_state["ext_cap"] = cap
+        state = st.session_state.get("ext_state")
+        if state is None:
+            state = _SessionState(st.session_state.lang_code, motion_threshold)
+            st.session_state["ext_state"] = state
+
+        got_frame = False
+        for _ in range(15):
+            ok, frame = cap.read()
+            if not ok:
+                break
+            got_frame = True
+            frame = analyze_bgr(frame, state)
+            holder.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB", use_container_width=True)
+
+        if not got_frame:
+            st.session_state["ext_running"] = False
+            try:
+                cap.release()
+            except Exception:
+                pass
+            st.session_state["ext_cap"] = None
+            st.session_state["ext_state"] = None
+            st.error(LANG["cam_url_invalid"])
+        else:
+            time.sleep(0.05)
+            st.rerun()
+else:
+    st.caption(LANG["live_hint"])
+    webrtc_streamer(
+        key=f"tarek-face-recognition-{motion_threshold}",
+        video_frame_callback=make_video_processor(st.session_state.lang_code, motion_threshold),
+        media_stream_constraints={
+            "video": {"facingMode": camera_mode},
+            "audio": False,
+        },
+        rtc_configuration={"iceServers": get_ice_servers()},
+    )
 
 # ============================================================
 # تقرير الفترة (أسبوعي/شهري)

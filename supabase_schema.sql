@@ -16,7 +16,8 @@ create table if not exists public.students (
     student_id  text,
     photo       text,
     feature     text,
-    created_at  timestamptz not null default now()
+    created_at  timestamptz not null default now(),
+    unique (name, class_name, photo)
 );
 
 -- إن كانت الجداول موجودة مسبقاً، أضف العمود الجديد فقط:
