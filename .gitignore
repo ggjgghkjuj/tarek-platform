@@ -20,3 +20,7 @@ faces_db/*
 # Local settings
 .vscode/
 .streamlit/secrets.toml
+
+# Automation tokens (سري - لا يُرفع)
+.render_token
+.supabase_token
