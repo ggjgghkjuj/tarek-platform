@@ -487,6 +487,8 @@ LANGUAGES = {
         "delete": "حذف",
         "confirm_delete": "تأكيد الحذف؟",
         "today_log": "سجل اليوم",
+        "device_phone": "هاتف",
+        "device_desktop": "كمبيوتر",
         "filter_by_class": "تصفية حسب الصف",
         "all_classes": "كل الصفوف",
         "present": "الحاضرون",
@@ -628,6 +630,8 @@ LANGUAGES = {
         "delete": "Delete",
         "confirm_delete": "Confirm delete?",
         "today_log": "Today's Log",
+        "device_phone": "Phone",
+        "device_desktop": "Desktop",
         "filter_by_class": "Filter by Class",
         "all_classes": "All Classes",
         "present": "Present",
@@ -723,8 +727,8 @@ LANGUAGES = {
 # ============================================================
 # إعدادات الوضع المظلم + اللون الأساسي
 # ============================================================
-def inject_css(is_dark, lang_code="ar"):
-    """حقن CSS مخصص للواجهة العصرية مع دعم الوضع المظلم واتجاه النص."""
+def inject_css(is_dark, lang_code="ar", is_mobile=False):
+    """حقن CSS مخصص للواجهة العصرية مع دعم الوضع المظلم واتجاه النص مع تجاوب للجوال."""
     if is_dark:
         bg = "#0f1117"
         card = "#1a1e2c"
@@ -741,6 +745,29 @@ def inject_css(is_dark, lang_code="ar"):
         sub = "#5b6478"
 
     direction = "rtl" if lang_code == "ar" else "ltr"
+
+    if is_mobile:
+        device_css = """
+    /* ===== وضع الهاتف: إظهار لوحة التحكم كاملة العرض في المسار الرئيسي ===== */
+    .device-badge {
+        background: #16a34a22;
+        color: #22c55e;
+    }
+    .stButton>button {
+        width: 100% !important;
+    }
+    """
+    else:
+        device_css = """
+    /* ===== وضع الكمبيوتر: لوحة تحكم جانبية أوسع قليلاً ===== */
+    [data-testid="stSidebar"] {
+        min-width: 380px !important;
+    }
+    .device-badge {
+        background: #2563eb22;
+        color: #60a5fa;
+    }
+    """
 
     st.markdown(f"""
     <style>
@@ -916,6 +943,20 @@ def inject_css(is_dark, lang_code="ar"):
             font-size: 0.8rem;
         }}
     }}
+    /* تكديس الأعمدة على شاشات الهواتف */
+    @media (max-width: 768px) {{
+        div[data-testid="stHorizontalBlock"] {{
+            flex-wrap: wrap !important;
+        }}
+        div[data-testid="stHorizontalBlock"] > div {{
+            min-width: 100% !important;
+            width: 100% !important;
+            flex: 1 1 100% !important;
+        }}
+        div[data-testid="column"] {{
+            min-width: 100% !important;
+        }}
+    }}
     /* Touch-friendly */
     @media (hover: none) and (pointer: coarse) {{
         .stButton>button {{
@@ -932,6 +973,7 @@ def inject_css(is_dark, lang_code="ar"):
             padding: 1rem 1.5rem;
         }}
     }}
+    {device_css}
     </style>
     """, unsafe_allow_html=True)
 
@@ -1239,8 +1281,31 @@ LANG = LANGUAGES[st.session_state.lang_code]
 # تخطيط الصفحة (يجب أن يكون أول استدعاء لكل عناصر Streamlit)
 st.set_page_config(page_title=f"{LANG['title']} - {LANG['subtitle']}", layout="wide")
 
+# كشف نوع الجهاز (هاتف أم كمبيوتر)
+def _detect_mobile():
+    # إمكانية الفرض يدوياً عبر الرابط: ?mobile=1 (هاتف) أو ?mobile=0 (كمبيوتر)
+    try:
+        qp = st.query_params
+        forced = qp.get("mobile")
+        if forced is not None:
+            return str(forced).lower() in ("1", "true", "yes", "on")
+    except Exception:
+        pass
+    try:
+        headers = getattr(st.context, "headers", {}) if hasattr(st, "context") else {}
+        ua = headers.get("User-Agent", "") or headers.get("user-agent", "") or ""
+        ua_l = ua.lower()
+        mobile_indicators = ["mobile", "android", "iphone", "ipod", "blackberry", "windows phone", "opera mini", "iemobile"]
+        return any(m in ua_l for m in mobile_indicators)
+    except Exception:
+        return False
+
+IS_MOBILE = _detect_mobile()
+if hasattr(st, "session_state"):
+    st.session_state["is_mobile"] = IS_MOBILE
+
 # حقن CSS (يُعاد بعد ضبط الوضع المظلم واللغة)
-inject_css(st.session_state.dark_mode, st.session_state.lang_code)
+inject_css(st.session_state.dark_mode, st.session_state.lang_code, is_mobile=IS_MOBILE)
 
 # ============================================================
 # الحماية بكلمة السر (شاشة الدخول للمطوّر)
@@ -1298,6 +1363,7 @@ st.markdown(f"""
         <p class="hero-title">{LANG['title']}</p>
         <p class="hero-sub">{LANG['subtitle']}</p>
         <span class="badge">🟢 Online &nbsp;|&nbsp; v2.0 &nbsp;|&nbsp; {TODAY}</span>
+        <span class="badge device-badge">{'📱 ' + LANG['device_phone'] if IS_MOBILE else '💻 ' + LANG['device_desktop']}</span>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1305,9 +1371,10 @@ st.markdown(f"""
 st.markdown(f"<p style='color:var(--sub);'>{LANG['info']}</p>", unsafe_allow_html=True)
 
 # ============================================================
-# الشريط الجانبي
+# لوحة التحكم — على الهاتف في المسار الرئيسي، وعلى الكمبيوتر في الشريط الجانبي
 # ============================================================
-with st.sidebar:
+_panel_ctx = st.container() if IS_MOBILE else st.sidebar
+with _panel_ctx:
     st.markdown(f"## {LANG['sidebar']}")
 
     # المطوّر الحالي + تسجيل الخروج
@@ -1384,7 +1451,7 @@ with st.sidebar:
             st.caption(f"{LANG['student_photos']}: {len(rec['photos'])}")
 
             if rec["photos"]:
-                cols = st.columns(min(len(rec["photos"]), 3))
+                cols = st.columns(min(len(rec["photos"]), 2 if IS_MOBILE else 3))
                 for i, ph in enumerate(rec["photos"]):
                     with cols[i % len(cols)]:
                         try:
