@@ -64,6 +64,11 @@
         opt.textContent = d.label || ((labels.select_label || "Camera") + " " + (i + 1));
         selectEl.appendChild(opt);
       });
+      if (isMobile() && cams.length > 1) {
+        selectEl.style.display = "flex";
+      } else if (isMobile()) {
+        selectEl.style.display = "none";
+      }
       return cams;
     }).catch(function () { return []; });
   }
@@ -89,10 +94,18 @@
     });
   }
 
+  function isMobile() {
+    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+  }
+
   function init() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       hintEl.textContent = labels.nocamera || "Camera not supported";
       setFrameHeight();
+      return;
+    }
+    if (isMobile()) {
+      startCamera(selectEl.value || null);
       return;
     }
     navigator.mediaDevices.getUserMedia({ video: true, audio: false })
@@ -105,18 +118,27 @@
   selectEl.addEventListener("change", function () { startCamera(selectEl.value); });
 
   captureBtn.addEventListener("click", function () {
-    if (!currentStream) { hintEl.textContent = labels.nocamera || "No camera"; return; }
+    if (!currentStream) {
+      startCamera(selectEl.value || null).then(function () {
+        captureFrame();
+      });
+      return;
+    }
+    captureFrame();
+  });
+
+  function captureFrame() {
     var w = video.videoWidth, h = video.videoHeight;
     if (!w || !h) { return; }
     canvas.width = w;
     canvas.height = h;
     canvas.getContext("2d").drawImage(video, 0, 0, w, h);
-    var dataUrl = canvas.toDataURL("image/jpeg", 0.9);
+    var dataUrl = canvas.toDataURL("image/jpeg", 0.95);
     sendMessage("streamlit:setComponentValue", {
       value: { image: dataUrl, nonce: Date.now() },
       dataType: "json"
     });
-  });
+  }
 
   video.addEventListener("loadedmetadata", setFrameHeight);
 
