@@ -415,7 +415,7 @@ def photo_path_for_local(file_name):
 MODELS_DIR = "models"
 FACE_DETECTOR = None
 FACE_RECOGNIZER = None
-FACE_MATCH_THRESHOLD = 0.40
+FACE_MATCH_THRESHOLD = 0.50
 # نصف قطر الربط بين إطارين متتاليين (بكسل) لاعتبار الوجه نفس الشخص
 FACE_TRACK_RADIUS = 160.0
 
@@ -500,6 +500,7 @@ LANGUAGES = {
         "theme_label": "الوضع المظلم",
         "lang_label": "اللغة",
         "motion_threshold": "حساسية كشف الحركة",
+        "match_threshold_label": "دقّة مطابقة الوجه (ارفعها إذا تشابهت الوجوه)",
         "processing": "جاري المعالجة...",
         "camera_label": "مصدر الكاميرا",
         "cam_front": "الكاميرا الأمامية",
@@ -632,6 +633,7 @@ LANGUAGES = {
         "theme_label": "Dark Mode",
         "lang_label": "Language",
         "motion_threshold": "Motion Detection Sensitivity",
+        "match_threshold_label": "Face match strictness (raise if faces look alike)",
         "processing": "Processing...",
         "camera_label": "Camera Source",
         "cam_front": "Front Camera",
@@ -1481,6 +1483,7 @@ with st.sidebar:
 
     # إعدادات الكاميرا: الحساسية + مصدر الكاميرا
     motion_threshold = st.slider(LANG["motion_threshold"], 1.0, 30.0, 8.0, 0.5)
+    match_threshold = st.slider(LANG["match_threshold_label"], 0.30, 0.70, 0.50, 0.01)
     cam_mode_options = [LANG["cam_mode_snapshot"], LANG["cam_mode_live"], LANG["cam_mode_url"]]
     cam_mode_sel = st.radio(LANG["cam_mode_label"], cam_mode_options, horizontal=True)
     camera_url = ""
@@ -1557,9 +1560,10 @@ known_encodings, known_names = load_known_encodings()
 # ============================================================
 class _SessionState:
     """حالة جلسة الكاميرا، تُشارك بين الإطارات عبر الـ callback."""
-    def __init__(self, lang_code, motion_threshold):
+    def __init__(self, lang_code, motion_threshold, match_threshold=FACE_MATCH_THRESHOLD):
         self.lang_code = lang_code
         self.motion_threshold = motion_threshold
+        self.match_threshold = match_threshold
         self.last_time = 0.0
         self.prev_centers = []
         self.process_interval = 2.0
@@ -1624,17 +1628,16 @@ def analyze_bgr(img, state):
         is_live = (not first_appearance) and best_d > state.motion_threshold
 
         # التعرف على الوجه
+        best_sim = -1.0
+        name = "Unknown"
         if len(known_encodings) > 0:
-            best_sim = -1.0
             best_name = "Unknown"
             for known_feat, known_name in zip(known_encodings, known_names):
                 sim = recognizer.match(face_encoding, known_feat)
                 if sim > best_sim:
                     best_sim = sim
                     best_name = known_name
-            name = best_name if best_sim >= FACE_MATCH_THRESHOLD else "Unknown"
-        else:
-            name = "Unknown"
+            name = best_name if best_sim >= state.match_threshold else "Unknown"
 
         # أول ظهور للوجه: نعرض الاسم بدل اتهامه بأنه صورة (لا تسجيل)
         if first_appearance:
@@ -1647,10 +1650,10 @@ def analyze_bgr(img, state):
                 log_attendance(name)
             else:
                 color = (0, 255, 255)
-                label = f"Unknown {live_suffix}"
+                label = f"Unknown {best_sim:.2f}"
         else:
             color = (0, 0, 255)
-            label = f"{photo_text} {name}"
+            label = f"{photo_text} {name}" if name != "Unknown" else f"{photo_text} {best_sim:.2f}"
 
         cv2.rectangle(img, (left, top), (right, bottom), color, 2)
         cv2.putText(img, label, (left, max(25, top - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
@@ -1659,9 +1662,9 @@ def analyze_bgr(img, state):
     return img
 
 
-def make_video_processor(lang_code, motion_threshold):
+def make_video_processor(lang_code, motion_threshold, match_threshold):
     """يُنشئ دالة callback تعالج الإطارات: كشف وجوه + تعرف + كشف حركة."""
-    state = _SessionState(lang_code, motion_threshold)
+    state = _SessionState(lang_code, motion_threshold, match_threshold)
 
     def video_frame_callback(frame):
         img = frame.to_ndarray(format="bgr24")
@@ -1688,13 +1691,14 @@ def analyze_snapshot(img, state):
         aligned = recognizer.alignCrop(img, face)
         face_encoding = recognizer.feature(aligned)
         name = "Unknown"
+        best_sim = -1.0
         if len(known_encodings) > 0:
-            best_sim, best_name = -1.0, "Unknown"
+            best_name = "Unknown"
             for known_feat, known_name in zip(known_encodings, known_names):
                 sim = recognizer.match(face_encoding, known_feat)
                 if sim > best_sim:
                     best_sim, best_name = sim, known_name
-            if best_sim >= FACE_MATCH_THRESHOLD:
+            if best_sim >= state.match_threshold:
                 name = best_name
         if name != "Unknown":
             color = (0, 255, 0)
@@ -1703,7 +1707,7 @@ def analyze_snapshot(img, state):
             recognized.append(name)
         else:
             color = (0, 0, 255)
-            label = "Unknown"
+            label = f"Unknown {best_sim:.2f}"
         cv2.rectangle(img, (left, top), (right, bottom), color, 2)
         cv2.putText(img, label, (left, max(25, top - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
     return img, recognized
@@ -1768,7 +1772,7 @@ if camera_source_mode == "url":
             st.session_state["ext_cap"] = cap
         state = st.session_state.get("ext_state")
         if state is None:
-            state = _SessionState(st.session_state.lang_code, motion_threshold)
+            state = _SessionState(st.session_state.lang_code, motion_threshold, match_threshold)
             st.session_state["ext_state"] = state
 
         got_frame = False
@@ -1797,7 +1801,7 @@ else:
         st.caption(LANG["live_hint"])
         webrtc_streamer(
             key=f"tarek-face-recognition-{motion_threshold}",
-            video_frame_callback=make_video_processor(st.session_state.lang_code, motion_threshold),
+            video_frame_callback=make_video_processor(st.session_state.lang_code, motion_threshold, match_threshold),
             media_stream_constraints={
                 "video": {"facingMode": camera_mode},
                 "audio": False,
@@ -1820,7 +1824,7 @@ else:
             if frame is not None:
                 state = st.session_state.get("snap_state")
                 if state is None:
-                    state = _SessionState(st.session_state.lang_code, motion_threshold)
+                    state = _SessionState(st.session_state.lang_code, motion_threshold, match_threshold)
                     st.session_state["snap_state"] = state
                 processed, recognized = analyze_snapshot(frame, state)
                 st.session_state["snap_result"] = (cv2.cvtColor(processed, cv2.COLOR_BGR2RGB), sorted(set(recognized)))
