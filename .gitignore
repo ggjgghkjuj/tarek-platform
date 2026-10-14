@@ -24,3 +24,9 @@ faces_db/*
 # Automation tokens (سري - لا يُرفع)
 .render_token
 .supabase_token
+.hf_token
+.github_token
+
+# توثيق محلي
+DOCUMENTATION.docx
+DOCUMENTATION.md
