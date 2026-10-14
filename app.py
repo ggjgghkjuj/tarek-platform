@@ -511,6 +511,11 @@ LANGUAGES = {
         "cam_url_start": "▶️ تشغيل بث الكاميرا",
         "cam_url_stop": "⏹ إيقاف البث",
         "cam_url_invalid": "تعذّر الاتصال بالكاميرا — تحقّق من الرابط.",
+        "cam_mode_snapshot": "التقاط صورة (موثوق)",
+        "cam_mode_live": "بث مباشر (قد لا يعمل على بعض الشبكات)",
+        "snapshot_hint": "اضغط زر الكاميرا لالتقاط صورة — سيُسجَّل الحضور تلقائياً خلال لحظات.",
+        "snapshot_logged": "تم تسجيل الحضور",
+        "snapshot_none": "لم يتم التعرف على أي وجه مسجّل — قرّب الوجه للإطار وحاول مجدداً.",
         "welcome_title": "أهلاً وسهلاً في منصة طارق",
         "welcome_sub": "قف أمام الكاميرا وسيُسجَّل حضورك تلقائياً — لا حاجة لأي إجراء آخر",
         "about_title": "عن المنصة",
@@ -635,6 +640,11 @@ LANGUAGES = {
         "cam_url_start": "▶️ Start camera stream",
         "cam_url_stop": "⏹ Stop stream",
         "cam_url_invalid": "Could not connect to the camera — check the URL.",
+        "cam_mode_snapshot": "Snapshot (reliable)",
+        "cam_mode_live": "Live stream (may fail on some networks)",
+        "snapshot_hint": "Press the camera button to take a photo — attendance is logged automatically.",
+        "snapshot_logged": "Attendance logged",
+        "snapshot_none": "No registered face recognized — move closer and try again.",
         "login_title": "Login",
         "login_sub": "This platform is protected — enter the developer password",
         "password_label": "Password",
@@ -1465,7 +1475,7 @@ with st.sidebar:
 
     # إعدادات الكاميرا: الحساسية + مصدر الكاميرا
     motion_threshold = st.slider(LANG["motion_threshold"], 1.0, 30.0, 8.0, 0.5)
-    cam_mode_options = [LANG["cam_mode_device"], LANG["cam_mode_url"]]
+    cam_mode_options = [LANG["cam_mode_snapshot"], LANG["cam_mode_live"], LANG["cam_mode_url"]]
     cam_mode_sel = st.radio(LANG["cam_mode_label"], cam_mode_options, horizontal=True)
     camera_url = ""
     camera_mode = "user"
@@ -1474,11 +1484,13 @@ with st.sidebar:
         st.session_state["cam_url"] = camera_url
         st.caption(LANG["cam_url_hint"])
         camera_source_mode = "url"
-    else:
+    elif cam_mode_sel == LANG["cam_mode_live"]:
         cam_options = [LANG["cam_front"], LANG["cam_back"]]
         selected_cam = st.selectbox(LANG["camera_label"], cam_options)
         camera_mode = "user" if selected_cam == LANG["cam_front"] else "environment"
         camera_source_mode = "device"
+    else:
+        camera_source_mode = "snapshot"
 
     st.caption(f"{LANG['students_count']}: {len(all_students_names())} | {LANG['date']}: {TODAY}")
     sync_label = LANG["sync_cloud"] if cloud_enabled() else LANG["sync_local"]
@@ -1653,17 +1665,69 @@ def make_video_processor(lang_code, motion_threshold):
     return video_frame_callback
 
 
+def analyze_snapshot(img, state):
+    """يحلل لقطة واحدة ويسجّل الحضور للوجوه المعروفة مباشرة (بلا شرط الحركة)."""
+    detector, recognizer = ensure_models()
+    h, w = img.shape[:2]
+    detector.setInputSize((w, h))
+    _, faces = detector.detect(img)
+    lang = LANGUAGES[state.lang_code]
+    recognized = []
+    if faces is None or len(faces) == 0:
+        cv2.putText(img, lang["scanning"], (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+        return img, recognized
+    for face in faces:
+        fx, fy, fw, fh = face[:4]
+        left, top, right, bottom = int(fx), int(fy), int(fx + fw), int(fy + fh)
+        aligned = recognizer.alignCrop(img, face)
+        face_encoding = recognizer.feature(aligned)
+        name = "Unknown"
+        if len(known_encodings) > 0:
+            best_sim, best_name = -1.0, "Unknown"
+            for known_feat, known_name in zip(known_encodings, known_names):
+                sim = recognizer.match(face_encoding, known_feat)
+                if sim > best_sim:
+                    best_sim, best_name = sim, known_name
+            if best_sim >= FACE_MATCH_THRESHOLD:
+                name = best_name
+        if name != "Unknown":
+            color = (0, 255, 0)
+            label = name
+            log_attendance(name)
+            recognized.append(name)
+        else:
+            color = (0, 0, 255)
+            label = "Unknown"
+        cv2.rectangle(img, (left, top), (right, bottom), color, 2)
+        cv2.putText(img, label, (left, max(25, top - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+    return img, recognized
+
+
 # ============================================================
 # منطقة الكاميرا
 # ============================================================
 def get_ice_servers():
-    """يضيف STUN دائماً، وTURN من Secrets إن وُجد (لتحسين الاتصال عبر الشبكات المقيّدة)."""
-    servers = [{"urls": ["stun:stun.l.google.com:19302"]}]
-    turn_url = get_secret("TURN_URL")
-    turn_user = get_secret("TURN_USERNAME")
-    turn_cred = get_secret("TURN_CREDENTIAL")
-    if turn_url:
-        servers.append({"urls": [turn_url], "username": turn_user or "", "credential": turn_cred or ""})
+    """STUN + TURN. افتراضياً يستخدم Open Relay المجاني، ويمكن تجاوزه بمتغيرات TURN_* في Secrets/البيئة."""
+    servers = [
+        {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]},
+    ]
+    env_url = get_secret("TURN_URL")
+    env_user = get_secret("TURN_USERNAME")
+    env_cred = get_secret("TURN_CREDENTIAL")
+    if env_url:
+        urls = [u.strip() for u in env_url.split(",") if u.strip()]
+        servers.append({"urls": urls, "username": env_user or "", "credential": env_cred or ""})
+    else:
+        servers.append({
+            "urls": [
+                "turn:openrelay.metered.ca:80",
+                "turn:openrelay.metered.ca:80?transport=tcp",
+                "turn:openrelay.metered.ca:443",
+                "turns:openrelay.metered.ca:443?transport=tcp",
+            ],
+            "username": env_user or "openrelayproject",
+            "credential": env_cred or "openrelayproject",
+        })
     return servers
 
 
@@ -1712,16 +1776,33 @@ if camera_source_mode == "url":
             time.sleep(0.05)
             st.rerun()
 else:
-    st.caption(LANG["live_hint"])
-    webrtc_streamer(
-        key=f"tarek-face-recognition-{motion_threshold}",
-        video_frame_callback=make_video_processor(st.session_state.lang_code, motion_threshold),
-        media_stream_constraints={
-            "video": {"facingMode": camera_mode},
-            "audio": False,
-        },
-        rtc_configuration={"iceServers": get_ice_servers()},
-    )
+    if camera_source_mode == "device":
+        st.caption(LANG["live_hint"])
+        webrtc_streamer(
+            key=f"tarek-face-recognition-{motion_threshold}",
+            video_frame_callback=make_video_processor(st.session_state.lang_code, motion_threshold),
+            media_stream_constraints={
+                "video": {"facingMode": camera_mode},
+                "audio": False,
+            },
+            rtc_configuration={"iceServers": get_ice_servers()},
+        )
+    else:
+        st.caption(LANG["snapshot_hint"])
+        snap = st.camera_input(LANG["snapshot_hint"])
+        if snap is not None:
+            frame = cv2.imdecode(np.frombuffer(snap.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+            if frame is not None:
+                state = st.session_state.get("snap_state")
+                if state is None:
+                    state = _SessionState(st.session_state.lang_code, motion_threshold)
+                    st.session_state["snap_state"] = state
+                processed, recognized = analyze_snapshot(frame, state)
+                st.image(cv2.cvtColor(processed, cv2.COLOR_BGR2RGB), use_container_width=True)
+                if recognized:
+                    st.success(f"{LANG['snapshot_logged']}: " + " ، ".join(sorted(set(recognized))))
+                else:
+                    st.warning(LANG["snapshot_none"])
 
 # ============================================================
 # تقرير الفترة (أسبوعي/شهري)
