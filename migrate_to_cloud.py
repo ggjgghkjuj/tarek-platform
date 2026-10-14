@@ -8,6 +8,7 @@ import os
 import json
 import time
 import sys
+import uuid
 
 import numpy as np
 import cv2
@@ -164,7 +165,7 @@ def main():
 
         img_bytes = open(it["file"], "rb").read()
         ext = os.path.splitext(it["file"])[1].lower()
-        object_path = str(int(time.time() * 1000)) + "_" + name.replace(" ", "_") + ext
+        object_path = str(int(time.time() * 1000)) + "_" + uuid.uuid4().hex[:12] + ext
         hdrs = headers(key)
         hdrs["Content-Type"] = "image/jpeg"
         try:

@@ -29,6 +29,7 @@ API = "https://api.supabase.com/v1"
 BASE = os.path.dirname(os.path.abspath(__file__))
 TOKEN_FILE = os.path.join(BASE, ".supabase_token")
 PROJECT_NAME = os.environ.get("SUPABASE_PROJECT_NAME", "tarek-platform")
+ORG_NAME = os.environ.get("SUPABASE_ORG_NAME", "tarek")
 REGION = os.environ.get("SUPABASE_REGION", "eu-central-1")
 BUCKET = "student-photos"
 DEV_PASSWORD = os.environ.get("DEVELOPER_PASSWORD", "tarek1234")
@@ -53,6 +54,22 @@ def api(tok, method, path, **kw):
     return requests.request(method, API + path, headers=headers(tok), timeout=120, **kw)
 
 
+def get_or_create_org(tok):
+    r = api(tok, "GET", "/organizations")
+    orgs = r.json() if r.status_code < 300 else []
+    if orgs:
+        return orgs[0]
+    print("لا توجد منظمة — سيتم إنشاء منظمة باسم:", ORG_NAME)
+    r = api(tok, "POST", "/organizations", json={"name": ORG_NAME})
+    if r.status_code >= 300:
+        print("فشل إنشاء المنظمة:", r.status_code, r.text[:400])
+        print("بديل: أنشئ منظمة يدوياً من لوحة Supabase ثم أعد تشغيل السكربت.")
+        sys.exit(1)
+    org = r.json()
+    print("أُنشئت المنظمة:", org.get("slug"), org.get("id"))
+    return org
+
+
 def find_or_create_project(tok):
     r = api(tok, "GET", "/projects")
     if r.status_code < 300:
@@ -61,11 +78,7 @@ def find_or_create_project(tok):
                 print("المشروع موجود مسبقاً:", p["ref"])
                 return p["ref"]
 
-    orgs = api(tok, "GET", "/organizations").json()
-    if not orgs:
-        print("لا توجد منظمة (organization) في الحساب")
-        sys.exit(1)
-    org = orgs[0]
+    org = get_or_create_org(tok)
     org_id = org.get("id")
     org_slug = org.get("slug") or org.get("id")
     db_pass = secrets.token_urlsafe(24)
