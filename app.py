@@ -7,12 +7,19 @@ import json
 import hmac
 import time
 import uuid
+import gc
 import shutil
 import threading
 import numpy as np
 from datetime import datetime, timedelta
 import requests
 import streamlit.components.v1 as components
+
+# تقليل عدد خيوط OpenCV لخفض البصمة الذاكرة على الخوادم الصغيرة
+try:
+    cv2.setNumThreads(1)
+except Exception:
+    pass
 
 # ============================================================
 # إعدادات المنصة
@@ -435,14 +442,21 @@ FACE_MATCH_THRESHOLD = 0.50
 FACE_TRACK_RADIUS = 160.0
 
 
+@st.cache_resource
+def _load_face_models():
+    """يحمّل نماذج الكشف والتعرف مرة واحدة لكل عملية خادم (لا تتكرر مع كل rerun)."""
+    det_path = os.path.join(MODELS_DIR, "face_detection_yunet_2023mar.onnx")
+    rec_path = os.path.join(MODELS_DIR, "face_recognition_sface_2021dec.onnx")
+    det = cv2.FaceDetectorYN_create(det_path, "", (320, 320))
+    rec = cv2.FaceRecognizerSF_create(rec_path, "")
+    return det, rec
+
+
 def ensure_models():
-    """يحمّل نماذج الكشف والتعرف مرة واحدة فقط لكل عملية."""
+    """يعيد نماذج الكشف والتعرف (مُخزّنة ومشتركة لتفادي إعادة التحميل)."""
     global FACE_DETECTOR, FACE_RECOGNIZER
     if FACE_DETECTOR is None:
-        det_path = os.path.join(MODELS_DIR, "face_detection_yunet_2023mar.onnx")
-        rec_path = os.path.join(MODELS_DIR, "face_recognition_sface_2021dec.onnx")
-        FACE_DETECTOR = cv2.FaceDetectorYN_create(det_path, "", (320, 320))
-        FACE_RECOGNIZER = cv2.FaceRecognizerSF_create(rec_path, "")
+        FACE_DETECTOR, FACE_RECOGNIZER = _load_face_models()
     return FACE_DETECTOR, FACE_RECOGNIZER
 
 
