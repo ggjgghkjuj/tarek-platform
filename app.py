@@ -13,8 +13,6 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 import requests
-import av
-from streamlit_webrtc import webrtc_streamer
 import streamlit.components.v1 as components
 
 # ============================================================
@@ -1667,6 +1665,7 @@ def make_video_processor(lang_code, motion_threshold, match_threshold):
     state = _SessionState(lang_code, motion_threshold, match_threshold)
 
     def video_frame_callback(frame):
+        import av
         img = frame.to_ndarray(format="bgr24")
         img = analyze_bgr(img, state)
         return av.VideoFrame.from_ndarray(img, format="bgr24")
@@ -1798,6 +1797,7 @@ if camera_source_mode == "url":
             st.rerun()
 else:
     if camera_source_mode == "device":
+        from streamlit_webrtc import webrtc_streamer
         st.caption(LANG["live_hint"])
         webrtc_streamer(
             key=f"tarek-face-recognition-{motion_threshold}",
