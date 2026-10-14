@@ -39,15 +39,22 @@ PHOTOS_DIR = os.path.join(DB_PATH, "photos")
 _manifest_lock = threading.Lock()
 
 
-def init_storage():
-    """يقرأ مفاتيح Supabase من Secrets؛ إن غابت يعمل المخزن المحلي."""
-    global SUPABASE_URL, SUPABASE_KEY
+def get_secret(name, default=None):
+    """يقرأ سرّاً من Secrets أو من متغيرات البيئة (للنشر السحابي مثل Render)."""
     try:
-        SUPABASE_URL = st.secrets.get("SUPABASE_URL")
-        SUPABASE_KEY = st.secrets.get("SUPABASE_SERVICE_KEY")
+        val = st.secrets.get(name)
     except Exception:
-        SUPABASE_URL = None
-        SUPABASE_KEY = None
+        val = None
+    if val is None:
+        val = os.environ.get(name, default)
+    return val
+
+
+def init_storage():
+    """يقرأ مفاتيح Supabase من Secrets/البيئة؛ إن غابت يعمل المخزن المحلي."""
+    global SUPABASE_URL, SUPABASE_KEY
+    SUPABASE_URL = get_secret("SUPABASE_URL")
+    SUPABASE_KEY = get_secret("SUPABASE_SERVICE_KEY")
 
 
 def cloud_enabled():
@@ -1150,10 +1157,7 @@ inject_css(st.session_state.dark_mode, st.session_state.lang_code)
 # ============================================================
 # الحماية بكلمة السر (شاشة الدخول للمطوّر)
 # ============================================================
-try:
-    AUTH_PASSWORD = st.secrets.get("DEVELOPER_PASSWORD")
-except Exception:
-    AUTH_PASSWORD = None
+AUTH_PASSWORD = get_secret("DEVELOPER_PASSWORD")
 
 init_storage()
 
@@ -1655,14 +1659,11 @@ def make_video_processor(lang_code, motion_threshold):
 def get_ice_servers():
     """يضيف STUN دائماً، وTURN من Secrets إن وُجد (لتحسين الاتصال عبر الشبكات المقيّدة)."""
     servers = [{"urls": ["stun:stun.l.google.com:19302"]}]
-    try:
-        turn_url = st.secrets.get("TURN_URL")
-        turn_user = st.secrets.get("TURN_USERNAME")
-        turn_cred = st.secrets.get("TURN_CREDENTIAL")
-        if turn_url:
-            servers.append({"urls": [turn_url], "username": turn_user or "", "credential": turn_cred or ""})
-    except Exception:
-        pass
+    turn_url = get_secret("TURN_URL")
+    turn_user = get_secret("TURN_USERNAME")
+    turn_cred = get_secret("TURN_CREDENTIAL")
+    if turn_url:
+        servers.append({"urls": [turn_url], "username": turn_user or "", "credential": turn_cred or ""})
     return servers
 
 
