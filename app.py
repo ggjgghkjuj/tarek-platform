@@ -10,7 +10,6 @@ import uuid
 import shutil
 import threading
 import numpy as np
-import pandas as pd
 from datetime import datetime, timedelta
 import requests
 import streamlit.components.v1 as components
@@ -569,6 +568,7 @@ LANGUAGES = {
         "report_to": "إلى تاريخ",
         "download_range": "تنزيل تقرير الفترة (Excel)",
         "range_empty": "لا توجد سجلات في هذه الفترة.",
+        "show_range_report": "عرض تقرير الفترة (اختياري)",
         "col_id": "رقم القيد",
         "col_days_present": "أيام الحضور",
         "col_total_days": "أيام التسجيل",
@@ -681,6 +681,7 @@ LANGUAGES = {
         "report_to": "To",
         "download_range": "Download Period Report (Excel)",
         "range_empty": "No records in this period.",
+        "show_range_report": "Show period report (optional)",
         "col_id": "Student ID",
         "col_days_present": "Days Present",
         "col_total_days": "Recorded Days",
@@ -1095,8 +1096,8 @@ def get_attendance_records(start_date, end_date):
     return rows
 
 
-def generate_excel(date, lang):
-    """DataFrame: رقم القيد، الصف، الاسم، الحالة، وقت الدخول."""
+def build_today_rows(date, lang):
+    """يعيد صفوف سجل اليوم كقائمة قواميس (بلا pandas لخفض الذاكرة)."""
     present = _present_map_for_date(date)
     L = LANGUAGES[lang]
     rows = []
@@ -1111,6 +1112,14 @@ def generate_excel(date, lang):
             L["col_time"]: present.get(name, L["absent_time"]),
         })
     rows.sort(key=lambda r: (r[L["col_class"]], r[L["col_name"]]))
+    return rows
+
+
+def generate_excel(date, lang):
+    """DataFrame للتنزيل فقط؛ pandas يُحمَّل عند الطلب فقط."""
+    import pandas as pd
+    L = LANGUAGES[lang]
+    rows = build_today_rows(date, lang)
     return pd.DataFrame(rows, columns=[L["col_id"], L["col_class"], L["col_name"], L["col_status"], L["col_time"]])
 
 
@@ -1123,6 +1132,7 @@ def generate_excel_for_class(date, class_name, lang):
 
 def generate_range_report(start_date, end_date, lang):
     """تقرير فترة: أيام الحضور لكل طالب + نسبة الحضور."""
+    import pandas as pd
     records = get_attendance_records(start_date, end_date)
     L = LANGUAGES[lang]
     days = sorted({d for _, d, _ in records})
@@ -1433,16 +1443,17 @@ with st.sidebar:
     filter_class_key = st.selectbox(LANG["filter_by_class"], filter_keys, format_func=lambda k: filter_labels[k])
 
     if filter_class_key == "all":
-        df_today = generate_excel(TODAY, st.session_state.lang_code)
+        rows_today = build_today_rows(TODAY, st.session_state.lang_code)
     else:
-        map_val = None if filter_class_key == "untracked" else filter_class_key
-        df_today = generate_excel_for_class(TODAY, map_val, st.session_state.lang_code)
+        L_today = LANGUAGES[st.session_state.lang_code]
+        cls_label = L_today["untracked"] if filter_class_key in ("untracked", None, "__root__") else filter_class_key
+        rows_today = [r for r in build_today_rows(TODAY, st.session_state.lang_code) if r[L_today["col_class"]] == cls_label]
 
     col_status = LANG["col_status"]
     status_p = LANG["status_present"]
 
     # استخدام metric مخصص
-    present_count = (df_today[col_status] == status_p).sum() if not df_today.empty else 0
+    present_count = sum(1 for r in rows_today if r.get(col_status) == status_p)
     metric_html = f"""
     <div class="metric-card">
         <div class="metric-value">{present_count}</div>
@@ -1451,8 +1462,14 @@ with st.sidebar:
     """
     st.markdown(metric_html, unsafe_allow_html=True)
 
-    if not df_today.empty:
-        st.dataframe(df_today, use_container_width=True, hide_index=True)
+    if rows_today:
+        _headers = [LANG["col_id"], LANG["col_class"], LANG["col_name"], LANG["col_status"], LANG["col_time"]]
+        _th = "".join(f'<th style="text-align:right;padding:8px;border-bottom:1px solid #333;color:#9aa4b2">{h}</th>' for h in _headers)
+        _body = "".join(
+            "<tr>" + "".join(f'<td style="text-align:right;padding:8px;border-bottom:1px solid #262b3a">{r.get(h, "")}</td>' for h in _headers) + "</tr>"
+            for r in rows_today
+        )
+        st.markdown(f'<table style="width:100%;border-collapse:collapse;font-size:0.9rem"><thead><tr>{_th}</tr></thead><tbody>{_body}</tbody></table>', unsafe_allow_html=True)
     else:
         st.info(LANG["no_students"])
 
@@ -1842,24 +1859,26 @@ else:
 st.divider()
 st.markdown(f"## {LANG['report_range']}")
 
-default_start = (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d")
-col_from, col_to = st.columns(2)
-with col_from:
-    start_date = st.date_input(LANG["report_from"], value=datetime.strptime(default_start, "%Y-%m-%d"))
-with col_to:
-    end_date = st.date_input(LANG["report_to"], value=datetime.now())
+if st.checkbox(LANG["show_range_report"]):
+    default_start = (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d")
+    col_from, col_to = st.columns(2)
+    with col_from:
+        start_date = st.date_input(LANG["report_from"], value=datetime.strptime(default_start, "%Y-%m-%d"))
+    with col_to:
+        end_date = st.date_input(LANG["report_to"], value=datetime.now())
 
-df_range = generate_range_report(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"),
-                                 st.session_state.lang_code)
-if df_range.empty:
-    st.info(LANG["range_empty"])
-else:
-    st.dataframe(df_range, use_container_width=True, hide_index=True)
-    buf_range = io.BytesIO()
-    df_range.to_excel(buf_range, index=False, engine="openpyxl")
-    st.download_button(
-        label=LANG["download_range"],
-        data=buf_range.getvalue(),
-        file_name=f"report_{start_date.strftime('%Y-%m-%d')}_{end_date.strftime('%Y-%m-%d')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+    df_range = generate_range_report(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"),
+                                     st.session_state.lang_code)
+    if df_range.empty:
+        st.info(LANG["range_empty"])
+    else:
+        st.dataframe(df_range, use_container_width=True, hide_index=True)
+        if st.button(LANG["download_range"]):
+            buf_range = io.BytesIO()
+            df_range.to_excel(buf_range, index=False, engine="openpyxl")
+            st.download_button(
+                label=LANG["download_click"],
+                data=buf_range.getvalue(),
+                file_name=f"report_{start_date.strftime('%Y-%m-%d')}_{end_date.strftime('%Y-%m-%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
