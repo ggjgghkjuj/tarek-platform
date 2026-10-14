@@ -99,24 +99,6 @@ def _load_manifest():
         return _empty_manifest()
 
 
-def _log_mem(tag):
-    """يطبع استهلاك الذاكرة في سجل Render لتشخيص OOM (Linux فقط)."""
-    try:
-        with open("/proc/self/status") as f:
-            vals = {}
-            for line in f:
-                if line.startswith(("VmRSS:", "VmHWM:")):
-                    k, v = line.split(":", 1)
-                    vals[k] = v.strip()
-        if vals:
-            print(f"[MEM] {tag}: RSS={vals.get('VmRSS', '?')} PEAK={vals.get('VmHWM', '?')}", flush=True)
-    except Exception:
-        pass
-
-
-_log_mem("startup")
-
-
 def _save_manifest(m):
     os.makedirs(DB_PATH, exist_ok=True)
     tmp = MANIFEST_PATH + ".tmp"
@@ -1914,5 +1896,3 @@ if st.checkbox(LANG["show_range_report"]):
                 file_name=f"report_{start_date.strftime('%Y-%m-%d')}_{end_date.strftime('%Y-%m-%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-
-_log_mem("script-end")
