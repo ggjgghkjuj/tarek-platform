@@ -2,6 +2,7 @@ import streamlit as st
 import cv2
 import os
 import io
+import base64
 import json
 import hmac
 import time
@@ -14,6 +15,7 @@ from datetime import datetime, timedelta
 import requests
 import av
 from streamlit_webrtc import webrtc_streamer
+import streamlit.components.v1 as components
 
 # ============================================================
 # إعدادات المنصة
@@ -516,6 +518,8 @@ LANGUAGES = {
         "snapshot_hint": "اضغط زر الكاميرا لالتقاط صورة — سيُسجَّل الحضور تلقائياً خلال لحظات.",
         "snapshot_logged": "تم تسجيل الحضور",
         "snapshot_none": "لم يتم التعرف على أي وجه مسجّل — قرّب الوجه للإطار وحاول مجدداً.",
+        "snap_capture": "📸 التقاط وتسجيل",
+        "snap_select_cam": "اختر الكاميرا",
         "welcome_title": "أهلاً وسهلاً في منصة طارق",
         "welcome_sub": "قف أمام الكاميرا وسيُسجَّل حضورك تلقائياً — لا حاجة لأي إجراء آخر",
         "about_title": "عن المنصة",
@@ -645,6 +649,8 @@ LANGUAGES = {
         "snapshot_hint": "Press the camera button to take a photo — attendance is logged automatically.",
         "snapshot_logged": "Attendance logged",
         "snapshot_none": "No registered face recognized — move closer and try again.",
+        "snap_capture": "📸 Capture & log",
+        "snap_select_cam": "Select camera",
         "login_title": "Login",
         "login_sub": "This platform is protected — enter the developer password",
         "password_label": "Password",
@@ -1706,6 +1712,17 @@ def analyze_snapshot(img, state):
 # ============================================================
 # منطقة الكاميرا
 # ============================================================
+_CAMERA_PICKER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "camera_picker")
+_camera_picker_component = components.declare_component("camera_picker", path=_CAMERA_PICKER_DIR)
+
+
+def camera_device_picker(button_label, select_label, hint, key=None):
+    """مكوّن التقاط صورة مع إمكانية اختيار كاميرا محدّدة (USB مثلاً)."""
+    return _camera_picker_component(
+        button_label=button_label, select_label=select_label, hint=hint, key=key, default=None
+    )
+
+
 def get_ice_servers():
     """STUN + TURN. افتراضياً يستخدم Open Relay المجاني، ويمكن تجاوزه بمتغيرات TURN_* في Secrets/البيئة."""
     servers = [
@@ -1789,20 +1806,31 @@ else:
         )
     else:
         st.caption(LANG["snapshot_hint"])
-        snap = st.camera_input(LANG["snapshot_hint"])
-        if snap is not None:
-            frame = cv2.imdecode(np.frombuffer(snap.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+        result = camera_device_picker(
+            LANG["snap_capture"], LANG["snap_select_cam"], LANG["snapshot_hint"], key="snap_camera")
+        if isinstance(result, dict) and result.get("image") and result.get("nonce") != st.session_state.get("snap_nonce"):
+            st.session_state["snap_nonce"] = result.get("nonce")
+            data = result["image"]
+            if "," in data:
+                data = data.split(",", 1)[1]
+            try:
+                frame = cv2.imdecode(np.frombuffer(base64.b64decode(data), np.uint8), cv2.IMREAD_COLOR)
+            except Exception:
+                frame = None
             if frame is not None:
                 state = st.session_state.get("snap_state")
                 if state is None:
                     state = _SessionState(st.session_state.lang_code, motion_threshold)
                     st.session_state["snap_state"] = state
                 processed, recognized = analyze_snapshot(frame, state)
-                st.image(cv2.cvtColor(processed, cv2.COLOR_BGR2RGB), use_container_width=True)
-                if recognized:
-                    st.success(f"{LANG['snapshot_logged']}: " + " ، ".join(sorted(set(recognized))))
-                else:
-                    st.warning(LANG["snapshot_none"])
+                st.session_state["snap_result"] = (cv2.cvtColor(processed, cv2.COLOR_BGR2RGB), sorted(set(recognized)))
+        snap_result = st.session_state.get("snap_result")
+        if snap_result:
+            st.image(snap_result[0], use_container_width=True)
+            if snap_result[1]:
+                st.success(f"{LANG['snapshot_logged']}: " + " ، ".join(snap_result[1]))
+            else:
+                st.warning(LANG["snapshot_none"])
 
 # ============================================================
 # تقرير الفترة (أسبوعي/شهري)

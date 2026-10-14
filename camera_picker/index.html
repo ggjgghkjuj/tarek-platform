@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { display: flex; flex-direction: column; gap: 8px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  select {
+    flex: 1; min-width: 160px; padding: 7px 8px; border-radius: 8px;
+    border: 1px solid rgba(128,128,128,0.4); background: transparent; color: inherit; font-size: 14px;
+  }
+  video {
+    width: 100%; min-height: 220px; max-height: 340px; background: #000;
+    border-radius: 10px; object-fit: cover;
+  }
+  button {
+    padding: 9px 18px; border: 0; border-radius: 10px; background: #ff4b4b;
+    color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+  button:active { transform: scale(0.98); }
+  .hint { color: #7a7a7a; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="row">
+    <select id="devices"></select>
+  </div>
+  <video id="preview" autoplay playsinline muted></video>
+  <div class="row">
+    <button id="capture">Capture</button>
+    <span class="hint" id="hint"></span>
+  </div>
+</div>
+<canvas id="canvas" style="display:none"></canvas>
+<script>
+(function () {
+  var selectEl = document.getElementById("devices");
+  var video = document.getElementById("preview");
+  var captureBtn = document.getElementById("capture");
+  var hintEl = document.getElementById("hint");
+  var canvas = document.getElementById("canvas");
+  var currentStream = null;
+  var labels = {};
+
+  function sendMessage(type, payload) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, payload || {}), "*");
+  }
+  sendMessage("streamlit:componentReady", { apiVersion: 1 });
+
+  function setFrameHeight() {
+    sendMessage("streamlit:setFrameHeight", { height: document.body.scrollHeight });
+  }
+
+  function listDevices() {
+    return navigator.mediaDevices.enumerateDevices().then(function (devs) {
+      var cams = devs.filter(function (d) { return d.kind === "videoinput"; });
+      selectEl.innerHTML = "";
+      cams.forEach(function (d, i) {
+        var opt = document.createElement("option");
+        opt.value = d.deviceId;
+        opt.textContent = d.label || ((labels.select_label || "Camera") + " " + (i + 1));
+        selectEl.appendChild(opt);
+      });
+      return cams;
+    }).catch(function () { return []; });
+  }
+
+  function startCamera(deviceId) {
+    if (currentStream) {
+      currentStream.getTracks().forEach(function (t) { t.stop(); });
+      currentStream = null;
+    }
+    var constraints = { video: deviceId ? { deviceId: { exact: deviceId } } : true, audio: false };
+    return navigator.mediaDevices.getUserMedia(constraints).then(function (stream) {
+      currentStream = stream;
+      video.srcObject = stream;
+      var track = stream.getVideoTracks()[0];
+      if (track && track.getSettings) {
+        var sid = track.getSettings().deviceId;
+        if (sid) selectEl.value = sid;
+      }
+      setFrameHeight();
+    }).catch(function (e) {
+      hintEl.textContent = (labels.error || "Camera error") + ": " + e.message;
+      setFrameHeight();
+    });
+  }
+
+  function init() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      hintEl.textContent = labels.nocamera || "Camera not supported";
+      setFrameHeight();
+      return;
+    }
+    navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+      .then(function (s) { s.getTracks().forEach(function (t) { t.stop(); }); })
+      .catch(function () {})
+      .then(listDevices)
+      .then(function () { return startCamera(selectEl.value || null); });
+  }
+
+  selectEl.addEventListener("change", function () { startCamera(selectEl.value); });
+
+  captureBtn.addEventListener("click", function () {
+    if (!currentStream) { hintEl.textContent = labels.nocamera || "No camera"; return; }
+    var w = video.videoWidth, h = video.videoHeight;
+    if (!w || !h) { return; }
+    canvas.width = w;
+    canvas.height = h;
+    canvas.getContext("2d").drawImage(video, 0, 0, w, h);
+    var dataUrl = canvas.toDataURL("image/jpeg", 0.9);
+    sendMessage("streamlit:setComponentValue", {
+      value: { image: dataUrl, nonce: Date.now() },
+      dataType: "json"
+    });
+  });
+
+  video.addEventListener("loadedmetadata", setFrameHeight);
+
+  window.addEventListener("message", function (event) {
+    var data = event.data;
+    if (!data || data.type !== "streamlit:render") { return; }
+    var args = data.args || {};
+    labels = args;
+    if (args.button_label) { captureBtn.textContent = args.button_label; }
+    if (args.hint) { hintEl.textContent = args.hint; }
+    setFrameHeight();
+  });
+
+  init();
+  setInterval(setFrameHeight, 1000);
+})();
+</script>
+</body>
+</html>
