@@ -1912,12 +1912,16 @@ else:
         if isinstance(result, dict) and result.get("image") and result.get("nonce") != st.session_state.get("snap_nonce"):
             st.session_state["snap_nonce"] = result.get("nonce")
             data = result["image"]
-            if "," in data:
-                data = data.split(",", 1)[1]
-            try:
-                frame = cv2.imdecode(np.frombuffer(base64.b64decode(data), np.uint8), cv2.IMREAD_COLOR)
-            except Exception:
-                frame = None
+            if isinstance(data, str) and data.startswith("data:"):
+                if "," in data:
+                    data = data.split(",", 1)[1]
+            if isinstance(data, str) and data.startswith("C:") or data.startswith("/") or data.startswith("\\"):
+                frame = cv2.imread(data)
+            else:
+                try:
+                    frame = cv2.imdecode(np.frombuffer(base64.b64decode(data), np.uint8), cv2.IMREAD_COLOR)
+                except Exception:
+                    frame = None
             if frame is not None:
                 state = st.session_state.get("snap_state")
                 if state is None:
