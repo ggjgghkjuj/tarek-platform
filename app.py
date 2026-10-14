@@ -583,6 +583,13 @@ LANGUAGES = {
         "download_range": "تنزيل تقرير الفترة (Excel)",
         "range_empty": "لا توجد سجلات في هذه الفترة.",
         "show_range_report": "عرض تقرير الفترة (اختياري)",
+        "manage_attendance": "حذف سجلات الحضور",
+        "select_record": "اختر السجل",
+        "delete_record": "حذف السجل المحدد",
+        "clear_day": "حذف كل سجلات اليوم",
+        "record_deleted": "تم حذف السجل.",
+        "records_cleared": "تم حذف كل سجلات اليوم.",
+        "no_records": "لا توجد سجلات لحذفها.",
         "col_id": "رقم القيد",
         "col_days_present": "أيام الحضور",
         "col_total_days": "أيام التسجيل",
@@ -696,6 +703,13 @@ LANGUAGES = {
         "download_range": "Download Period Report (Excel)",
         "range_empty": "No records in this period.",
         "show_range_report": "Show period report (optional)",
+        "manage_attendance": "Delete attendance records",
+        "select_record": "Select record",
+        "delete_record": "Delete selected record",
+        "clear_day": "Delete all today's records",
+        "record_deleted": "Record deleted.",
+        "records_cleared": "All today's records deleted.",
+        "no_records": "No records to delete.",
         "col_id": "Student ID",
         "col_days_present": "Days Present",
         "col_total_days": "Recorded Days",
@@ -1110,6 +1124,40 @@ def get_attendance_records(start_date, end_date):
     return rows
 
 
+def delete_attendance_record(name, date_str):
+    """يحذف سجل حضور طالب في تاريخ محدد (سحابة أو محلي)."""
+    if cloud_enabled():
+        try:
+            requests.delete(f"{SUPABASE_URL}/rest/v1/attendance",
+                            params={"student_name": f"eq.{name}", "date": f"eq.{date_str}"},
+                            headers=_rest_headers(), timeout=10)
+        except Exception as e:
+            print(f"Attendance delete error: {e}")
+        return
+    conn = sqlite3_connect()
+    c = conn.cursor()
+    c.execute("DELETE FROM attendance WHERE student_name = ? AND date = ?", (name, date_str))
+    conn.commit()
+    conn.close()
+
+
+def delete_attendance_day(date_str):
+    """يحذف كل سجلات الحضور في تاريخ محدد (سحابة أو محلي)."""
+    if cloud_enabled():
+        try:
+            requests.delete(f"{SUPABASE_URL}/rest/v1/attendance",
+                            params={"date": f"eq.{date_str}"},
+                            headers=_rest_headers(), timeout=10)
+        except Exception as e:
+            print(f"Attendance day delete error: {e}")
+        return
+    conn = sqlite3_connect()
+    c = conn.cursor()
+    c.execute("DELETE FROM attendance WHERE date = ?", (date_str,))
+    conn.commit()
+    conn.close()
+
+
 def build_today_rows(date, lang):
     """يعيد صفوف سجل اليوم كقائمة قواميس (بلا pandas لخفض الذاكرة)."""
     present = _present_map_for_date(date)
@@ -1486,6 +1534,24 @@ with st.sidebar:
         st.markdown(f'<table style="width:100%;border-collapse:collapse;font-size:0.9rem"><thead><tr>{_th}</tr></thead><tbody>{_body}</tbody></table>', unsafe_allow_html=True)
     else:
         st.info(LANG["no_students"])
+
+    with st.expander(LANG["manage_attendance"]):
+        today_present = get_today_present()
+        if not today_present:
+            st.caption(LANG["no_records"])
+        else:
+            _opts = [f"{n} — {t}" for n, t in today_present]
+            _sel = st.selectbox(LANG["select_record"], _opts, key="del_att_sel")
+            _idx = _opts.index(_sel)
+            _c1, _c2 = st.columns(2)
+            if _c1.button(LANG["delete_record"], key="del_att_one", use_container_width=True):
+                delete_attendance_record(today_present[_idx][0], TODAY)
+                st.success(LANG["record_deleted"])
+                st.rerun()
+            if _c2.button(LANG["clear_day"], key="del_att_day", use_container_width=True):
+                delete_attendance_day(TODAY)
+                st.success(LANG["records_cleared"])
+                st.rerun()
 
     st.divider()
 
