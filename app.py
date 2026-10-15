@@ -1647,7 +1647,12 @@ with _panel_ctx:
     motion_threshold = st.slider(LANG["motion_threshold"], 1.0, 30.0, 8.0, 0.5)
     match_threshold = st.slider(LANG["match_threshold_label"], 0.30, 0.70, 0.50, 0.01)
     cam_mode_options = [LANG["cam_mode_snapshot"], LANG["cam_mode_live"], LANG["cam_mode_url"]]
-    cam_mode_sel = st.radio(LANG["cam_mode_label"], cam_mode_options, horizontal=True)
+    default_mode = cam_mode_options[0]
+    if "cam_mode_prev" not in st.session_state:
+        st.session_state["cam_mode_prev"] = default_mode
+    cam_mode_sel = st.radio(LANG["cam_mode_label"], cam_mode_options, horizontal=True, index=cam_mode_options.index(st.session_state["cam_mode_prev"]) if st.session_state["cam_mode_prev"] in cam_mode_options else 0)
+    if cam_mode_sel != st.session_state["cam_mode_prev"]:
+        st.session_state["cam_mode_prev"] = cam_mode_sel
     camera_url = ""
     camera_mode = "user"
     if cam_mode_sel == LANG["cam_mode_url"]:
@@ -1662,6 +1667,9 @@ with _panel_ctx:
         camera_source_mode = "device"
     else:
         camera_source_mode = "snapshot"
+        # keep snapshot result visible for quick re-snap
+        if "snap_nonce" not in st.session_state:
+            st.session_state["snap_nonce"] = 0
 
     st.caption(f"{LANG['students_count']}: {len(all_students_names())} | {LANG['date']}: {TODAY}")
     sync_label = LANG["sync_cloud"] if cloud_enabled() else LANG["sync_local"]
@@ -1990,7 +1998,7 @@ else:
                         except Exception:
                             frame = None
             if frame is None and isinstance(data, str):
-                if not (data.startswith("data:")) and (data.startswith("C:") or data.startswith("/") or data.startswith("\\") or len(data) > 2 and data[1:3] == ":"):
+                if not (data.startswith("data:")) and ((len(data) > 1 and data[1:3] == ":") or data.startswith("/") or data.startswith("\\") or data.startswith("C:")):
                     frame = cv2.imread(data)
             if frame is None and isinstance(data, str):
                 try:
@@ -2008,7 +2016,7 @@ else:
         if snap_result:
             st.image(snap_result[0], use_container_width=True)
             if snap_result[1]:
-                st.success(f"{LANG['snapshot_logged']}: " + " ، ".join(snap_result[1]))
+                st.success(f"{LANG['snapshot_logged']}: " + ", ".join(snap_result[1]))
             else:
                 st.warning(LANG["snapshot_none"])
 
