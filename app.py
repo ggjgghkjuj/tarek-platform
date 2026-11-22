@@ -5,6 +5,7 @@ import io
 import base64
 import json
 import hmac
+import hashlib
 import time
 import uuid
 import gc
@@ -1455,13 +1456,46 @@ inject_css(st.session_state.dark_mode, st.session_state.lang_code, is_mobile=IS_
 # الحماية بكلمة السر (شاشة الدخول للمطوّر)
 # ============================================================
 AUTH_PASSWORD = get_secret("DEVELOPER_PASSWORD")
+# رمز دخول محفوظ في الرابط: يمنع الخروج من المنصة عند إعادة اتصال الجلسة على التابلت/الهاتف
+AUTH_TOKEN = hashlib.sha256((AUTH_PASSWORD or "dev").encode("utf-8")).hexdigest()[:16]
+
+
+def _is_authed():
+    """الدخول في ذاكرة الجلسة أو مثبّت في رابط الصفحة."""
+    if st.session_state.get("auth_role") == "developer":
+        return True
+    try:
+        if st.query_params.get("auth") == AUTH_TOKEN:
+            st.session_state.auth_role = "developer"
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _set_authed():
+    st.session_state.auth_role = "developer"
+    try:
+        st.query_params["auth"] = AUTH_TOKEN
+    except Exception:
+        pass
+
+
+def _clear_authed():
+    st.session_state.pop("auth_role", None)
+    try:
+        if "auth" in st.query_params:
+            del st.query_params["auth"]
+    except Exception:
+        pass
+
 
 init_storage()
 
 
 def render_login_gate():
     """يعرض شاشة الدخول ويوقف التطبيق حتى إدخال كلمة السر الصحيحة."""
-    if st.session_state.get("auth_role") == "developer":
+    if _is_authed():
         return
     if not AUTH_PASSWORD:
         st.markdown(f"""
@@ -1488,7 +1522,7 @@ def render_login_gate():
         pwd = st.text_input(LANG["password_label"], type="password")
         if st.button(LANG["login_btn"], use_container_width=True):
             if pwd and hmac.compare_digest(pwd, AUTH_PASSWORD):
-                st.session_state.auth_role = "developer"
+                _set_authed()
                 st.rerun()
             else:
                 st.error(LANG["wrong_password"])
@@ -1522,10 +1556,10 @@ with _panel_ctx:
     st.markdown(f"## {LANG['sidebar']}")
 
     # المطوّر الحالي + تسجيل الخروج
-    if st.session_state.get("auth_role") == "developer":
+    if _is_authed():
         st.caption(f"👨‍💻 {LANG['developer']}")
         if st.button(LANG["logout"], use_container_width=True):
-            st.session_state.pop("auth_role", None)
+            _clear_authed()
             st.rerun()
         st.divider()
 
