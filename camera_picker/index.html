@@ -19,20 +19,26 @@
     padding: 9px 18px; border: 0; border-radius: 10px; background: #ff4b4b;
     color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
   }
+  button.secondary { background: rgba(128,128,128,0.35); }
   button:active { transform: scale(0.98); }
-  .hint { color: #7a7a7a; font-size: 13px; }
+  .hint { color: #7a7a7a; font-size: 13px; flex: 1; }
+  .status { font-size: 13px; font-weight: 600; }
+  .status.err { color: #ff4b4b; }
+  .status.ok { color: #2ea043; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="row">
     <select id="devices"></select>
+    <button id="retry" class="secondary" type="button">↻</button>
   </div>
   <video id="preview" autoplay playsinline muted></video>
   <div class="row">
-    <button id="capture">Capture</button>
+    <button id="capture" type="button">Capture</button>
     <span class="hint" id="hint"></span>
   </div>
+  <div class="status" id="status"></div>
 </div>
 <canvas id="canvas" style="display:none"></canvas>
 <script>
@@ -40,10 +46,21 @@
   var selectEl = document.getElementById("devices");
   var video = document.getElementById("preview");
   var captureBtn = document.getElementById("capture");
+  var retryBtn = document.getElementById("retry");
   var hintEl = document.getElementById("hint");
+  var statusEl = document.getElementById("status");
   var canvas = document.getElementById("canvas");
   var currentStream = null;
   var labels = {};
+  var started = false;
+
+  function msg(name, fallback) { return labels[name] || fallback; }
+
+  function setStatus(text, kind) {
+    statusEl.textContent = text || "";
+    statusEl.className = "status" + (kind ? " " + kind : "");
+    setFrameHeight();
+  }
 
   function sendMessage(type, payload) {
     window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, payload || {}), "*");
@@ -54,91 +71,125 @@
     sendMessage("streamlit:setFrameHeight", { height: document.body.scrollHeight });
   }
 
+  function isMobile() {
+    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+  }
+
+  function errorText(e) {
+    if (!e) return msg("error_generic", "Camera error");
+    if (e.name === "NotAllowedError" || e.name === "PermissionDeniedError" || e.name === "SecurityError") {
+      return msg("error_permission", "Camera permission denied — allow camera access in your browser");
+    }
+    if (e.name === "NotFoundError" || e.name === "DevicesNotFoundError" || e.name === "OverconstrainedError") {
+      return msg("error_notfound", "No camera found on this device");
+    }
+    if (e.name === "NotReadableError" || e.name === "TrackStartError") {
+      return msg("error_inuse", "Camera is in use by another app — close it and retry");
+    }
+    return (msg("error_generic", "Camera error") + ": " + (e.message || e.name || ""));
+  }
+
+  function stopStream() {
+    if (currentStream) {
+      currentStream.getTracks().forEach(function (t) { t.stop(); });
+      currentStream = null;
+    }
+  }
+
   function listDevices() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+      return Promise.resolve([]);
+    }
     return navigator.mediaDevices.enumerateDevices().then(function (devs) {
       var cams = devs.filter(function (d) { return d.kind === "videoinput"; });
       selectEl.innerHTML = "";
       cams.forEach(function (d, i) {
         var opt = document.createElement("option");
         opt.value = d.deviceId;
-        opt.textContent = d.label || ((labels.select_label || "Camera") + " " + (i + 1));
+        opt.textContent = d.label || ((msg("select_label", "Camera") + " " + (i + 1)));
         selectEl.appendChild(opt);
       });
-      if (isMobile() && cams.length > 1) {
-        selectEl.style.display = "flex";
-      } else if (isMobile()) {
-        selectEl.style.display = "none";
+      // على الهاتف: أخفِ القائمة إن كانت كاميرا واحدة فقط
+      if (isMobile()) {
+        selectEl.style.display = cams.length > 1 ? "flex" : "none";
+      } else {
+        selectEl.style.display = cams.length ? "flex" : "none";
+      }
+      if (!cams.length) {
+        setStatus(msg("no_cameras", "No camera detected"), "err");
       }
       return cams;
     }).catch(function () { return []; });
   }
 
-  function startCamera(deviceId) {
-    if (currentStream) {
-      currentStream.getTracks().forEach(function (t) { t.stop(); });
-      currentStream = null;
-    }
-    var constraints = { video: deviceId ? { deviceId: { exact: deviceId } } : true, audio: false };
+  function startCamera(deviceId, fallback) {
+    stopStream();
+    var constraints = {
+      video: deviceId ? { deviceId: { ideal: deviceId } } : { facingMode: "user" },
+      audio: false
+    };
     return navigator.mediaDevices.getUserMedia(constraints).then(function (stream) {
       currentStream = stream;
       video.srcObject = stream;
+      started = true;
       var track = stream.getVideoTracks()[0];
-      if (track && track.getSettings) {
-        var sid = track.getSettings().deviceId;
-        if (sid) selectEl.value = sid;
+      if (track) {
+        var settings = track.getSettings ? track.getSettings() : {};
+        if (settings.deviceId) {
+          for (var i = 0; i < selectEl.options.length; i++) {
+            if (selectEl.options[i].value === settings.deviceId) { selectEl.value = settings.deviceId; }
+          }
+        }
+        track.addEventListener("ended", function () { started = false; });
       }
-      setFrameHeight();
+      setStatus(msg("camera_ready", "Camera ready"), "ok");
+      // بعد منح الصلاحية، أعد التعداد للحصول على أسماء الكاميرات الحقيقية
+      return listDevices();
     }).catch(function (e) {
-      hintEl.textContent = (labels.error || "Camera error") + ": " + e.message;
+      started = false;
+      // فشل اختيار كاميرا محددة → جرّب الكاميرا الافتراضية مرة واحدة
+      if (deviceId && fallback !== false) {
+        return startCamera(null, false);
+      }
+      setStatus(errorText(e), "err");
       setFrameHeight();
     });
   }
 
-  function isMobile() {
-    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-  }
-
-  function init() {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      hintEl.textContent = labels.nocamera || "Camera not supported";
-      setFrameHeight();
-      return;
-    }
-    if (isMobile()) {
-      startCamera(selectEl.value || null);
-      return;
-    }
-    navigator.mediaDevices.getUserMedia({ video: true, audio: false })
-      .then(function (s) { s.getTracks().forEach(function (t) { t.stop(); }); })
-      .catch(function () {})
-      .then(listDevices)
-      .then(function () { return startCamera(selectEl.value || null); });
-  }
-
-  selectEl.addEventListener("change", function () { startCamera(selectEl.value); });
-
-  captureBtn.addEventListener("click", function () {
-    if (!currentStream) {
+  function captureFrame() {
+    var w = video.videoWidth, h = video.videoHeight;
+    if (!w || !h) {
+      setStatus(msg("camera_starting", "Starting camera…"), "err");
       startCamera(selectEl.value || null).then(function () {
-        captureFrame();
+        setTimeout(captureFrame, 250);
       });
       return;
     }
-    captureFrame();
-  });
-
-  function captureFrame() {
-    var w = video.videoWidth, h = video.videoHeight;
-    if (!w || !h) { return; }
     canvas.width = w;
     canvas.height = h;
     canvas.getContext("2d").drawImage(video, 0, 0, w, h);
     var dataUrl = canvas.toDataURL("image/jpeg", 0.95);
+    setStatus(msg("captured", "Photo captured — checking attendance…"), "ok");
     sendMessage("streamlit:setComponentValue", {
       value: { image: dataUrl, nonce: Date.now() },
       dataType: "json"
     });
   }
+
+  captureBtn.addEventListener("click", function () {
+    if (!started || !currentStream) {
+      startCamera(selectEl.value || null).then(captureFrame);
+      return;
+    }
+    captureFrame();
+  });
+
+  retryBtn.addEventListener("click", function () {
+    setStatus(msg("camera_starting", "Starting camera…"), null);
+    listDevices().then(function () { return startCamera(selectEl.value || null); });
+  });
+
+  selectEl.addEventListener("change", function () { startCamera(selectEl.value); });
 
   video.addEventListener("loadedmetadata", setFrameHeight);
 
@@ -149,8 +200,30 @@
     labels = args;
     if (args.button_label) { captureBtn.textContent = args.button_label; }
     if (args.hint) { hintEl.textContent = args.hint; }
+    if (args.select_label) {
+      var first = selectEl.options[0];
+      if (first && !first.textContent) { first.textContent = args.select_label; }
+    }
     setFrameHeight();
   });
+
+  function init() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus(msg("nocamera", "Camera not supported in this browser"), "err");
+      return;
+    }
+    setStatus(msg("camera_starting", "Starting camera…"), null);
+    if (isMobile()) {
+      startCamera(null).then(listDevices);
+      return;
+    }
+    // على الكمبيوتر: اطلب إذن الكاميرا أولاً حتى تظهر أسماء الأجهزة، ثم عدّدها
+    navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+      .then(function (s) { s.getTracks().forEach(function (t) { t.stop(); }); })
+      .catch(function () {})
+      .then(listDevices)
+      .then(function () { return startCamera(selectEl.value || null); });
+  }
 
   init();
   setInterval(setFrameHeight, 1000);

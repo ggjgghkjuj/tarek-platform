@@ -523,7 +523,7 @@ LANGUAGES = {
         "cam_mode_device": "كاميرا الجهاز / الويب كام",
         "cam_mode_url": "كاميرا خارجية بالرابط (IP)",
         "cam_url_label": "رابط الكاميرا (RTSP / HTTP-MJPEG)",
-        "cam_url_hint": "الصق رابط الكاميرا، مثال: rtsp://user:pass@192.168.1.10:554/stream  أو  http://192.168.1.10:8080/video",
+        "cam_url_hint": "رابط عام فقط! عناوين 192.168.x.x / 10.x.x.x لا تعمل من Render (السحابة). استخدم رابط MJPEG عاماً أو شغّل المنصة محلياً على نفس الشبكة. مثال: http://example.com:8080/video",
         "cam_url_start": "▶️ تشغيل بث الكاميرا",
         "cam_url_stop": "⏹ إيقاف البث",
         "cam_url_invalid": "تعذّر الاتصال بالكاميرا — تحقّق من الرابط.",
@@ -534,6 +534,15 @@ LANGUAGES = {
         "snapshot_none": "لم يتم التعرف على أي وجه مسجّل — قرّب الوجه للإطار وحاول مجدداً.",
         "snap_capture": "📸 التقاط وتسجيل",
         "snap_select_cam": "اختر الكاميرا",
+        "camera_ready": "الكاميرا جاهزة",
+        "camera_starting": "جارٍ تشغيل الكاميرا…",
+        "captured": "تم التقاط الصورة — جارٍ التحقق من الحضور…",
+        "no_cameras": "لم يتم العثور على كاميرا — تأكد من توصيلها",
+        "nocamera": "الكاميرا غير مدعومة في هذا المتصفح",
+        "error_permission": "تم رفض إذن الكاميرا — اسمح بالوصول للكاميرا من إعدادات المتصفح ثم اضغط ↻",
+        "error_notfound": "لا توجد كاميرا على هذا الجهاز",
+        "error_inuse": "الكاميرا مستخدمة من تطبيق آخر — أغلقه ثم اضغط ↻",
+        "error_generic": "خطأ في الكاميرا",
         "welcome_title": "أهلاً وسهلاً في منصة طارق",
         "welcome_sub": "قف أمام الكاميرا وسيُسجَّل حضورك تلقائياً — لا حاجة لأي إجراء آخر",
         "about_title": "عن المنصة",
@@ -665,7 +674,7 @@ LANGUAGES = {
         "cam_mode_device": "Device / Webcam",
         "cam_mode_url": "External camera by URL (IP)",
         "cam_url_label": "Camera URL (RTSP / HTTP-MJPEG)",
-        "cam_url_hint": "Paste the camera URL, e.g. rtsp://user:pass@192.168.1.10:554/stream or http://192.168.1.10:8080/video",
+        "cam_url_hint": "Public URL only! LAN addresses like 192.168.x.x / 10.x.x.x cannot be reached from Render (cloud). Use a public MJPEG URL or run the app locally on the same network. Example: http://example.com:8080/video",
         "cam_url_start": "▶️ Start camera stream",
         "cam_url_stop": "⏹ Stop stream",
         "cam_url_invalid": "Could not connect to the camera — check the URL.",
@@ -676,6 +685,15 @@ LANGUAGES = {
         "snapshot_none": "No registered face recognized — move closer and try again.",
         "snap_capture": "📸 Capture & log",
         "snap_select_cam": "Select camera",
+        "camera_ready": "Camera ready",
+        "camera_starting": "Starting camera…",
+        "captured": "Photo captured — checking attendance…",
+        "no_cameras": "No camera detected — make sure it is connected",
+        "nocamera": "Camera not supported in this browser",
+        "error_permission": "Camera permission denied — allow camera access in your browser then press ↻",
+        "error_notfound": "No camera found on this device",
+        "error_inuse": "Camera is in use by another app — close it then press ↻",
+        "error_generic": "Camera error",
         "login_title": "Login",
         "login_sub": "This platform is protected — enter the developer password",
         "password_label": "Password",
@@ -1900,11 +1918,12 @@ _CAMERA_PICKER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "c
 _camera_picker_component = components.declare_component("camera_picker", path=_CAMERA_PICKER_DIR)
 
 
-def camera_device_picker(button_label, select_label, hint, key=None):
+def camera_device_picker(button_label, select_label, hint, key=None, extra=None):
     """مكوّن التقاط صورة مع إمكانية اختيار كاميرا محدّدة (USB مثلاً)."""
-    return _camera_picker_component(
-        button_label=button_label, select_label=select_label, hint=hint, key=key, default=None
-    )
+    args = dict(button_label=button_label, select_label=select_label, hint=hint)
+    if extra:
+        args.update(extra)
+    return _camera_picker_component(key=key, default=None, **args)
 
 
 def get_ice_servers():
@@ -1992,7 +2011,11 @@ else:
     else:
         st.caption(LANG["snapshot_hint"])
         result = camera_device_picker(
-            LANG["snap_capture"], LANG["snap_select_cam"], LANG["snapshot_hint"], key="snap_camera")
+            LANG["snap_capture"], LANG["snap_select_cam"], LANG["snapshot_hint"], key="snap_camera",
+            extra={k: LANG[k] for k in (
+                "camera_ready", "camera_starting", "captured", "no_cameras", "nocamera",
+                "error_permission", "error_notfound", "error_inuse", "error_generic"
+            ) if k in LANG})
         if isinstance(result, dict) and result.get("image") and result.get("nonce") != st.session_state.get("snap_nonce"):
             st.session_state["snap_nonce"] = result.get("nonce")
             data = result["image"]
