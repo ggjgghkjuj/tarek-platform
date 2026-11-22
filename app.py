@@ -56,15 +56,69 @@ def get_secret(name, default=None):
     return val
 
 
+def _dns_reachable(host, timeout=2.5):
+    """فحص سريع ومحدود زمنياً لاسم المضيف — لا يتجاوز `timeout` أبداً."""
+    if not host:
+        return False
+    result = {"ok": False}
+
+    def _do():
+        try:
+            import socket
+            socket.gethostbyname(host)
+            result["ok"] = True
+        except Exception:
+            result["ok"] = False
+
+    t = threading.Thread(target=_do, daemon=True)
+    t.start()
+    t.join(timeout)
+    return result["ok"] and not t.is_alive()
+
+
 def init_storage():
     """يقرأ مفاتيح Supabase من Secrets/البيئة؛ إن غابت يعمل المخزن المحلي."""
     global SUPABASE_URL, SUPABASE_KEY
     SUPABASE_URL = get_secret("SUPABASE_URL")
     SUPABASE_KEY = get_secret("SUPABASE_SERVICE_KEY")
+    # فحص سريع لمرة واحدة لكل جلسة: إن كانت السحابة غير قابلة للوصول عطّلها فوراً
+    # حتى لا تتعلق عمليات الحفظ/القراءة في محاولات اتصال بطيئة.
+    if SUPABASE_URL and SUPABASE_KEY:
+        try:
+            if not st.session_state.get("_cloud_probed"):
+                st.session_state["_cloud_probed"] = True
+                host = SUPABASE_URL.split("://", 1)[-1].split("/", 1)[0]
+                if not _dns_reachable(host, 2.5):
+                    mark_cloud_down()
+        except Exception:
+            pass
+
+
+_CLOUD_DOWN = False
 
 
 def cloud_enabled():
-    return bool(SUPABASE_URL and SUPABASE_KEY)
+    """مفعّلة إذا توفّرت المفاتيح ولم تُعلن السحابة غير متاحة (قاطع الدائرة)."""
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return False
+    if _CLOUD_DOWN:
+        return False
+    try:
+        if st.session_state.get("_cloud_down"):
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def mark_cloud_down():
+    """تُستدعى عند فشل الاتصال بالسحابة — نتحول للمخزن المحلي فوراً وبلا تأخير."""
+    global _CLOUD_DOWN
+    _CLOUD_DOWN = True
+    try:
+        st.session_state["_cloud_down"] = True
+    except Exception:
+        pass
 
 
 def _rest_headers():
@@ -332,39 +386,63 @@ def cloud_delete_student(name, class_name):
 # ------------------------------------------------------------------
 # واجهة موحّدة (تختار السحابة أو المحلي تلقائياً)
 # ------------------------------------------------------------------
+# أخطاء تعني «السحابة غير متاحة» → نرجع للمخزن المحلي بدل إظهار فشل للمستخدم
+_CLOUD_FAIL = {"upload", "insert", "error"}
+
+
 def add_student(name, class_name, student_id, files):
     if cloud_enabled():
-        return cloud_add_student(name, class_name, student_id, files)
+        ok, status = cloud_add_student(name, class_name, student_id, files)
+        if ok or status not in _CLOUD_FAIL:
+            return ok, status
+        print(f"Cloud add failed ({status}) — falling back to local storage")
     return local_add_student(name, class_name, student_id, files)
 
 
 def add_student_photos(name, class_name, files):
     if cloud_enabled():
-        return cloud_add_photos(name, class_name, files)
+        ok, status = cloud_add_photos(name, class_name, files)
+        if ok or status not in _CLOUD_FAIL:
+            return ok, status
+        print(f"Cloud add-photos failed ({status}) — falling back to local storage")
     return local_add_photos(name, class_name, files)
 
 
 def update_student(old_name, old_class, new_name, new_class, student_id):
+    # السحابة أولاً إن كانت متاحة، ثم المحلي عند الفشل
     if cloud_enabled():
-        return cloud_update_student(old_name, old_class, new_name, new_class, student_id)
+        try:
+            ok, status = cloud_update_student(old_name, old_class, new_name, new_class, student_id)
+            if ok:
+                return ok, status
+        except Exception:
+            pass
+        print("Cloud update failed — falling back to local storage")
     return local_update_student(old_name, old_class, new_name, new_class, student_id)
 
 
 def delete_student(name, class_name):
     if cloud_enabled():
-        return cloud_delete_student(name, class_name)
+        try:
+            if cloud_delete_student(name, class_name):
+                return True
+        except Exception:
+            pass
+        print("Cloud delete failed — falling back to local storage")
     return local_delete_student(name, class_name)
 
 
 def delete_student_photo(name, class_name, file_name):
     if cloud_enabled():
         try:
-            requests.delete(f"{SUPABASE_URL}/rest/v1/students",
-                            params={"name": f"eq.{name}", "photo": f"eq.{file_name}"},
-                            headers=_rest_headers(), timeout=15)
-            return True
+            r = requests.delete(f"{SUPABASE_URL}/rest/v1/students",
+                                params={"name": f"eq.{name}", "photo": f"eq.{file_name}"},
+                                headers=_rest_headers(), timeout=15)
+            if r.status_code in (200, 204):
+                return True
         except Exception:
-            return False
+            pass
+        print("Cloud delete-photo failed — falling back to local storage")
     return local_delete_photo(name, class_name, file_name)
 
 
@@ -376,7 +454,7 @@ def add_class(class_name):
                           timeout=10)
             return True
         except Exception:
-            return False
+            pass
     with _manifest_lock:
         m = _load_manifest()
         if class_name not in m["classes"]:
@@ -394,7 +472,7 @@ def delete_class(class_name):
                             headers=_rest_headers(), timeout=15)
             return True
         except Exception:
-            return False
+            pass
     with _manifest_lock:
         m = _load_manifest()
         m["classes"] = [c for c in m["classes"] if c != class_name]
@@ -1011,7 +1089,7 @@ def get_classes():
                 if classes:
                     return classes
         except Exception:
-            pass
+            mark_cloud_down()
     m = _load_manifest()
     return sorted(set(m.get("classes", [])))
 
@@ -1043,7 +1121,7 @@ def get_student_records(class_name=None):
                 if groups:
                     return sorted(groups.values(), key=lambda g: (g["class"] or "", g["name"] or ""))
         except Exception:
-            pass
+            mark_cloud_down()
         # Supabase فارغ أو غير متاح → استخدم المخزن المحلي
     out = []
     for s in _load_manifest().get("students", []):
@@ -1130,7 +1208,7 @@ def get_today_present():
                 if rows:
                     return rows
         except Exception:
-            pass
+            mark_cloud_down()
     conn = sqlite3_connect()
     c = conn.cursor()
     c.execute("SELECT student_name, time FROM attendance WHERE date = ? ORDER BY time", (TODAY,))
@@ -1156,7 +1234,7 @@ def _present_map_for_date(date_str):
                 if present:
                     return present
         except Exception:
-            pass
+            mark_cloud_down()
         # السحابة فارغة أو غير متاحة → اقرأ السجلات المحلية
     conn = sqlite3_connect()
     c = conn.cursor()
@@ -1181,7 +1259,7 @@ def get_attendance_records(start_date, end_date):
                 if rows:
                     return rows
         except Exception:
-            pass
+            mark_cloud_down()
     conn = sqlite3_connect()
     c = conn.cursor()
     c.execute("SELECT student_name, date, time FROM attendance WHERE date BETWEEN ? AND ? ORDER BY date",
@@ -1735,7 +1813,7 @@ def load_known_encodings():
                         encodings.append(np.array(feat, dtype=np.float32))
                         names.append(row["name"])
         except Exception:
-            pass
+            mark_cloud_down()
     # دائماً أضف الوجوه المحلية — تعمل حتى لو كان Supabase فارغاً أو غير متاح
     for s in _load_manifest().get("students", []):
         name = s.get("name")
