@@ -989,10 +989,11 @@ def get_classes():
                              params={"select": "name", "order": "name.asc"},
                              headers=_rest_headers(), timeout=10)
             if r is not None and r.status_code == 200:
-                return sorted({row.get("name") for row in r.json() if row.get("name")})
+                classes = sorted({row.get("name") for row in r.json() if row.get("name")})
+                if classes:
+                    return classes
         except Exception:
             pass
-        return []
     m = _load_manifest()
     return sorted(set(m.get("classes", [])))
 
@@ -1021,10 +1022,11 @@ def get_student_records(class_name=None):
                                                 "student_id": row.get("student_id"), "photos": []})
                     if row.get("photo"):
                         g["photos"].append({"file": row["photo"], "url": public_photo_url(row["photo"])})
-                return sorted(groups.values(), key=lambda g: (g["class"] or "", g["name"] or ""))
+                if groups:
+                    return sorted(groups.values(), key=lambda g: (g["class"] or "", g["name"] or ""))
         except Exception:
             pass
-        return []
+        # Supabase فارغ أو غير متاح → استخدم المخزن المحلي
     out = []
     for s in _load_manifest().get("students", []):
         cl = s.get("class") or None
@@ -1082,11 +1084,12 @@ def log_attendance(name):
                 headers={**_rest_headers(), "Prefer": "resolution=ignore-duplicates,return=minimal"},
                 timeout=10,
             )
-            if r.status_code not in (200, 201, 204):
-                print(f"Attendance log failed: {r.status_code} {r.text}")
+            if r.status_code in (200, 201, 204):
+                return
+            print(f"Attendance log failed: {r.status_code} {r.text}")
         except Exception as e:
             print(f"Attendance log error: {e}")
-        return
+        # فشل السحابة → سجّل محلياً حتى لا يضيع الحضور
     conn = sqlite3_connect()
     c = conn.cursor()
     c.execute("SELECT id FROM attendance WHERE student_name = ? AND date = ?", (name, today))
@@ -1105,10 +1108,11 @@ def get_today_present():
                              params={"select": "student_name,time", "date": f"eq.{TODAY}", "order": "time.asc"},
                              headers=_rest_headers(), timeout=10)
             if r is not None and r.status_code == 200:
-                return [(row.get("student_name"), row.get("time") or "") for row in r.json()]
+                rows = [(row.get("student_name"), row.get("time") or "") for row in r.json()]
+                if rows:
+                    return rows
         except Exception:
             pass
-        return []
     conn = sqlite3_connect()
     c = conn.cursor()
     c.execute("SELECT student_name, time FROM attendance WHERE date = ? ORDER BY time", (TODAY,))
@@ -1153,10 +1157,11 @@ def get_attendance_records(start_date, end_date):
                                      "order": "date.asc"},
                              headers=_rest_headers(), timeout=20)
             if r is not None and r.status_code == 200:
-                return [(row.get("student_name"), row.get("date"), row.get("time") or "") for row in r.json()]
+                rows = [(row.get("student_name"), row.get("date"), row.get("time") or "") for row in r.json()]
+                if rows:
+                    return rows
         except Exception:
             pass
-        return []
     conn = sqlite3_connect()
     c = conn.cursor()
     c.execute("SELECT student_name, date, time FROM attendance WHERE date BETWEEN ? AND ? ORDER BY date",
@@ -1704,12 +1709,14 @@ def load_known_encodings():
             if r is not None and r.status_code == 200:
                 for row in r.json():
                     if row.get("feature"):
-                        encodings.append(np.array(json.loads(row["feature"]), dtype=np.float32))
+                        feat = row["feature"]
+                        if isinstance(feat, str):
+                            feat = json.loads(feat)
+                        encodings.append(np.array(feat, dtype=np.float32))
                         names.append(row["name"])
         except Exception:
             pass
-        return encodings, names
-
+    # دائماً أضف الوجوه المحلية — تعمل حتى لو كان Supabase فارغاً أو غير متاح
     for s in _load_manifest().get("students", []):
         name = s.get("name")
         for p in s.get("photos", []):
