@@ -183,13 +183,45 @@ def _find_local_student(m, name, class_name):
     return None
 
 
+# حدود آمنة لمعالجة الصور على خوادم صغيرة (512MB) — تمنع توقّف الصفحة مع صور التابلت الكبيرة
+MAX_IMAGE_SIDE = 1280
+MAX_IMAGE_BYTES = 25 * 1024 * 1024
+
+
+def _prep_image(img, max_side=MAX_IMAGE_SIDE):
+    """يصغّر الصورة إلى حدّ أقصى معقول مع الحفاظ على النسبة (للكشف والتعرف)."""
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    m = max(h, w)
+    if m > max_side:
+        scale = max_side / float(m)
+        img = cv2.resize(img, (max(1, int(w * scale)), max(1, int(h * scale))),
+                         interpolation=cv2.INTER_AREA)
+    return img
+
+
 def _extract_features(files):
     """files: [(bytes, ext)] -> (features, error)."""
     feats = []
     for data, ext in files:
-        img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+        try:
+            nbytes = len(data)
+        except Exception:
+            nbytes = 0
+        if nbytes and nbytes > MAX_IMAGE_BYTES:
+            return None, "too_large"
+        # فكّ ترميز اقتصادي للصور الكبيرة (صور التابلت) لخفض استهلاك الذاكرة
+        if nbytes > 8 * 1024 * 1024:
+            flag = cv2.IMREAD_REDUCED_COLOR_4
+        elif nbytes > 3 * 1024 * 1024:
+            flag = cv2.IMREAD_REDUCED_COLOR_2
+        else:
+            flag = cv2.IMREAD_COLOR
+        img = cv2.imdecode(np.frombuffer(data, np.uint8), flag)
         if img is None:
             return None, "cv2_fail"
+        img = _prep_image(img)
         feat = face_feature_from_image(img)
         if feat is None:
             return None, "no_face"
@@ -521,14 +553,17 @@ def ensure_models():
 
 
 def face_feature_from_image(img):
-    """يعيد متجه التعرف لأول وجه في الصورة، أو None إن لم يوجد وجه."""
+    """يعيد متجه التعرف لأكبر وجه في الصورة، أو None إن لم يوجد وجه."""
     detector, recognizer = ensure_models()
+    img = _prep_image(img)
     h, w = img.shape[:2]
     detector.setInputSize((w, h))
     _, faces = detector.detect(img)
     if faces is None or len(faces) == 0:
         return None
-    aligned = recognizer.alignCrop(img, faces[0])
+    # اختر أكبر وجه (الأقرب للكاميرا) بدل أول وجه عشوائي
+    best = max(faces, key=lambda f: float(f[2]) * float(f[3]))
+    aligned = recognizer.alignCrop(img, best)
     return recognizer.feature(aligned)
 
 # ============================================================
@@ -553,8 +588,11 @@ LANGUAGES = {
         "add_success": "تمت إضافة {} في {} بنجاح!",
         "add_duplicate": "يوجد طالب بهذا الاسم بالفعل. استخدم اسماً مختلفاً.",
         "add_warning": "الرجاء إدخال الاسم واختيار صورة.",
-        "no_face_found": "لم يُعثر على وجه واضح في الصورة — جرّب صورة أوضح ومباشرة.",
-        "add_error": "تعذّرت الإضافة — تحقّق من الاتصال بالسحابة وحاول مجدداً.",
+        "no_face_found": "لم يُعثر على وجه واضح في الصورة — جرّب صورة أوضح ومباشرة للوجه.",
+        "add_error": "تعذّرت الإضافة — حاول مجدداً.",
+        "image_unreadable": "تعذّر قراءة الصورة — استخدم صيغة JPG أو PNG (لا HEIC).",
+        "image_too_large": "الصورة كبيرة جداً — استخدم صورة أصغر من 25 ميجابايت.",
+        "processing_image": "جارٍ معالجة الصورة…",
         "new_class_label": "اسم الصف الجديد",
         "create_btn": "إنشاء الصف",
         "create_success": "تم إنشاء الصف: {}",
@@ -706,7 +744,10 @@ LANGUAGES = {
         "add_duplicate": "A student with this name already exists. Use a different one.",
         "add_warning": "Please enter a name and choose a photo.",
         "no_face_found": "No clear face found in the photo — try a clearer, front-facing image.",
-        "add_error": "Add failed — check the cloud connection and try again.",
+        "add_error": "Add failed — please try again.",
+        "image_unreadable": "Could not read the image — use JPG or PNG (not HEIC).",
+        "image_too_large": "The image is too large — use one smaller than 25 MB.",
+        "processing_image": "Processing image…",
         "new_class_label": "New Class Name",
         "create_btn": "Create Class",
         "create_success": "Class created: {}",
@@ -1516,7 +1557,7 @@ with _panel_ctx:
 
         new_name = st.text_input(LANG["name_label"])
         new_student_id = st.text_input(LANG["student_id_label"])
-        uploaded_files = st.file_uploader(LANG["photo_label"], type=["jpg", "jpeg", "png"],
+        uploaded_files = st.file_uploader(LANG["photo_label"], type=["jpg", "jpeg", "png", "webp"],
                                           accept_multiple_files=True, key="add_photos")
 
         if st.button(LANG["add_btn"]):
@@ -1527,9 +1568,14 @@ with _panel_ctx:
                     st.warning(LANG["student_exists"])
                 else:
                     files = [(f.getbuffer(), os.path.splitext(f.name)[1].lower() or ".jpg") for f in uploaded_files]
-                    ok, status = add_student(new_name.strip(), target_class, new_student_id, files)
+                    with st.spinner(LANG["processing_image"]):
+                        ok, status = add_student(new_name.strip(), target_class, new_student_id, files)
                     if status == "no_face":
                         st.warning(LANG["no_face_found"])
+                    elif status == "cv2_fail":
+                        st.error(LANG["image_unreadable"])
+                    elif status == "too_large":
+                        st.error(LANG["image_too_large"])
                     elif ok:
                         st.success(LANG["add_success"].format(new_name.strip(), selected_class))
                         st.cache_resource.clear()
@@ -1589,14 +1635,19 @@ with _panel_ctx:
                 else:
                     st.error(LANG["add_error"])
 
-            extra = st.file_uploader(LANG["extra_photos_label"], type=["jpg", "jpeg", "png"],
+            extra = st.file_uploader(LANG["extra_photos_label"], type=["jpg", "jpeg", "png", "webp"],
                                      accept_multiple_files=True, key=f"ex_{idx}")
             if st.button(LANG["add_photos_btn"], key=f"addp_{idx}"):
                 if extra:
                     files = [(f.getbuffer(), os.path.splitext(f.name)[1].lower() or ".jpg") for f in extra]
-                    ok, status = add_student_photos(rec["name"], rec["class"], files)
+                    with st.spinner(LANG["processing_image"]):
+                        ok, status = add_student_photos(rec["name"], rec["class"], files)
                     if status == "no_face":
                         st.warning(LANG["no_face_found"])
+                    elif status == "cv2_fail":
+                        st.error(LANG["image_unreadable"])
+                    elif status == "too_large":
+                        st.error(LANG["image_too_large"])
                     elif ok:
                         st.cache_resource.clear()
                         st.success(LANG["photo_added"])
