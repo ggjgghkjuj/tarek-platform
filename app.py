@@ -1135,9 +1135,11 @@ def _present_map_for_date(date_str):
             if r is not None and r.status_code == 200:
                 for row in r.json():
                     present[row.get("student_name")] = row.get("time") or ""
+                if present:
+                    return present
         except Exception:
             pass
-        return present
+        # السحابة فارغة أو غير متاحة → اقرأ السجلات المحلية
     conn = sqlite3_connect()
     c = conn.cursor()
     c.execute("SELECT student_name, time FROM attendance WHERE date = ?", (date_str,))
